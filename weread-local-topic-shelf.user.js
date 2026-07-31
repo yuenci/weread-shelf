@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.2.4
+// @version      0.3.0
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -19,11 +19,11 @@
     notes: "weread_local_book_context_notes_v1",
     cloudConfig: "weread_cloud_sync_config_v1",
     syncMeta: "weread_cloud_sync_meta_v1",
+    obsidianCache: "weread_obsidian_catalog_cache_v1",
   };
 
   const DEFAULT_CLOUD_BASE_URL = "";
-  const CLOUD_SCHEMA = "weread-topic-shelf";
-  const CLOUD_SCHEMA_VERSION = 1;
+  const CLOUD_SCHEMA_VERSION = 2;
   const CLOUD_PUSH_DELAY = 1800;
   const CLOUD_PULL_INTERVAL = 5 * 60 * 1000;
 
@@ -63,6 +63,18 @@
     syncQueued: false,
     cloudPushTimer: 0,
     lastCloudPullAt: 0,
+    panelTab: "groups",
+    catalogFilter: "all",
+    catalogQuery: "",
+    catalogLoading: false,
+    obsidianCache: {
+      books: [],
+      contexts: {},
+      stats: null,
+      resolvedAt: "",
+      cached: false,
+      error: "",
+    },
   };
 
   const text = {
@@ -102,6 +114,7 @@
     cloudSync: "云同步",
     syncNow: "立即同步",
     cloudSettingsTitle: "Cloudflare KV 云同步",
+    catalog: "书目匹配",
   };
 
   const DB_NAME = "weread_local_topic_shelf_db";
@@ -196,6 +209,7 @@
     let notes = await dbGet(STORE.notes, null);
     const cloudConfig = await dbGet(STORE.cloudConfig, null);
     const syncMeta = await dbGet(STORE.syncMeta, null);
+    const obsidianCache = await dbGet(STORE.obsidianCache, null);
 
     if (groups === null) {
       groups = readLegacyLocalStorage(STORE.groups, []);
@@ -234,6 +248,13 @@
             ? syncMeta.tombstones.notes
             : {},
       },
+    };
+    state.obsidianCache = {
+      ...state.obsidianCache,
+      ...(obsidianCache && typeof obsidianCache === "object"
+        ? obsidianCache
+        : {}),
+      cached: Boolean(obsidianCache),
     };
 
     if (!syncMeta) await dbSet(STORE.syncMeta, state.syncMeta);
@@ -351,21 +372,6 @@
     state.syncMeta.tombstones[type][id] = deletedAt;
   }
 
-  function timestampValue(value) {
-    const parsed = Date.parse(value || "");
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-
-  function laterTimestamp(first, second) {
-    return timestampValue(first) >= timestampValue(second) ? first || "" : second || "";
-  }
-
-  function recordUpdatedAt(record) {
-    return record && (record.updatedAt || record.createdAt)
-      ? record.updatedAt || record.createdAt
-      : "";
-  }
-
   function normalizeTombstones(value) {
     return {
       groups:
@@ -376,125 +382,6 @@
         value && value.notes && typeof value.notes === "object"
           ? value.notes
           : {},
-    };
-  }
-
-  function mergeTombstones(local, remote) {
-    const result = { groups: {}, notes: {} };
-
-    for (const type of ["groups", "notes"]) {
-      const localItems = (local && local[type]) || {};
-      const remoteItems = (remote && remote[type]) || {};
-      const ids = new Set([
-        ...Object.keys(localItems),
-        ...Object.keys(remoteItems),
-      ]);
-
-      ids.forEach((id) => {
-        result[type][id] = laterTimestamp(localItems[id], remoteItems[id]);
-      });
-    }
-
-    return result;
-  }
-
-  function mergeRecordMaps(localMap, remoteMap, tombstones) {
-    const result = {};
-    const ids = new Set([
-      ...Object.keys(localMap || {}),
-      ...Object.keys(remoteMap || {}),
-      ...Object.keys(tombstones || {}),
-    ]);
-
-    ids.forEach((id) => {
-      const localRecord = localMap && localMap[id];
-      const remoteRecord = remoteMap && remoteMap[id];
-      let chosen = localRecord || remoteRecord;
-
-      if (
-        localRecord &&
-        remoteRecord &&
-        timestampValue(recordUpdatedAt(remoteRecord)) >
-          timestampValue(recordUpdatedAt(localRecord))
-      ) {
-        chosen = remoteRecord;
-      }
-
-      if (
-        chosen &&
-        timestampValue(tombstones && tombstones[id]) <
-          timestampValue(recordUpdatedAt(chosen))
-      ) {
-        result[id] = cloneJson(chosen);
-      }
-    });
-
-    return result;
-  }
-
-  function groupsToMap(groups) {
-    return (Array.isArray(groups) ? groups : []).reduce((map, group) => {
-      if (group && group.id) map[group.id] = group;
-      return map;
-    }, {});
-  }
-
-  function mapToGroups(groupMap) {
-    return Object.values(groupMap).sort(
-      (first, second) =>
-        timestampValue(recordUpdatedAt(second)) -
-        timestampValue(recordUpdatedAt(first)),
-    );
-  }
-
-  function normalizeCloudPayload(value) {
-    if (
-      !value ||
-      typeof value !== "object" ||
-      value.schema !== CLOUD_SCHEMA ||
-      !value.data ||
-      typeof value.data !== "object"
-    ) {
-      throw new Error("云端数据格式不正确，已停止同步以保护本地数据。");
-    }
-
-    return {
-      schema: CLOUD_SCHEMA,
-      version: Number(value.version) || CLOUD_SCHEMA_VERSION,
-      updatedAt: value.updatedAt || "",
-      deviceId: value.deviceId || "",
-      data: {
-        groups: Array.isArray(value.data.groups) ? value.data.groups : [],
-        notes:
-          value.data.notes && typeof value.data.notes === "object"
-            ? value.data.notes
-            : {},
-      },
-      tombstones: normalizeTombstones(value.tombstones),
-    };
-  }
-
-  function cloudDataCore(groups, notes, tombstones) {
-    return {
-      data: {
-        groups: cloneJson(groups),
-        notes: cloneJson(notes),
-      },
-      tombstones: cloneJson(normalizeTombstones(tombstones)),
-    };
-  }
-
-  function buildCloudPayload() {
-    return {
-      schema: CLOUD_SCHEMA,
-      version: CLOUD_SCHEMA_VERSION,
-      updatedAt: nowIso(),
-      deviceId: state.syncMeta.deviceId,
-      ...cloudDataCore(
-        state.groups,
-        state.notes,
-        state.syncMeta.tombstones,
-      ),
     };
   }
 
@@ -515,8 +402,8 @@
     return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
   }
 
-  function cloudRequest(method, config, body) {
-    const url = `${normalizeBaseUrl(config.baseUrl)}/kv/${encodeURIComponent(config.key)}`;
+  function cloudApiRequest(method, config, path, body) {
+    const url = `${normalizeBaseUrl(config.baseUrl)}${path}`;
 
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -539,21 +426,19 @@
             return;
           }
 
-          if (response.status === 404) {
-            resolve({ status: 404, body: parsed });
-            return;
-          }
-
           if (
             response.status < 200 ||
             response.status >= 300 ||
             !parsed ||
             parsed.success !== true
           ) {
+            const details =
+              parsed && Array.isArray(parsed.details)
+                ? `：${parsed.details.join("；")}`
+                : "";
             reject(
               new Error(
-                (parsed && parsed.error) ||
-                  `云端请求失败（HTTP ${response.status}）。`,
+                `${(parsed && parsed.error) || `云端请求失败（HTTP ${response.status}）`}${details}`,
               ),
             );
             return;
@@ -571,81 +456,120 @@
     });
   }
 
-  async function applyMergedCloudData(remotePayload) {
-    const mergedTombstones = mergeTombstones(
-      state.syncMeta.tombstones,
-      remotePayload.tombstones,
-    );
-    const mergedGroups = mergeRecordMaps(
-      groupsToMap(state.groups),
-      groupsToMap(remotePayload.data.groups),
-      mergedTombstones.groups,
-    );
-    const mergedNotes = mergeRecordMaps(
-      state.notes,
-      remotePayload.data.notes,
-      mergedTombstones.notes,
-    );
-
-    const nextGroups = mapToGroups(mergedGroups);
-    const nextNotes = mergedNotes;
-    const before = JSON.stringify(
-      cloudDataCore(state.groups, state.notes, state.syncMeta.tombstones),
-    );
-    const after = JSON.stringify(
-      cloudDataCore(nextGroups, nextNotes, mergedTombstones),
-    );
+  async function applyWereadSyncResponse(payload) {
+    const nextGroups = Array.isArray(payload.groups) ? payload.groups : [];
+    const nextNotes =
+      payload.notes && typeof payload.notes === "object" ? payload.notes : {};
+    const nextTombstones = normalizeTombstones(payload.tombstones);
+    const changed =
+      JSON.stringify(state.groups) !== JSON.stringify(nextGroups) ||
+      JSON.stringify(state.notes) !== JSON.stringify(nextNotes) ||
+      JSON.stringify(state.syncMeta.tombstones) !==
+        JSON.stringify(nextTombstones);
 
     state.groups = nextGroups;
     state.notes = nextNotes;
-    state.syncMeta.tombstones = mergedTombstones;
+    state.syncMeta.tombstones = nextTombstones;
+    if (!changed) return;
 
-    if (before !== after) {
-      await Promise.all([
-        dbSet(STORE.groups, nextGroups),
-        dbSet(STORE.notes, nextNotes),
-      ]);
-      if (
-        !state.formMode &&
-        !document.getElementById("wr-topic-note-modal")
-      ) {
-        refreshShelf();
-      } else {
-        renderShelfGroups();
-        applyGroupedBookVisibility();
-        renderBookNoteIcons();
-      }
+    await Promise.all([
+      dbSet(STORE.groups, nextGroups),
+      dbSet(STORE.notes, nextNotes),
+    ]);
+    if (!state.formMode && !document.getElementById("wr-topic-note-modal")) {
+      refreshShelf();
+    } else {
+      renderShelfGroups();
+      applyHiddenBooks();
+      renderBookNoteIcons();
+    }
+  }
+
+  function getObsidianContext(bookId) {
+    return state.obsidianCache.contexts[bookId] || null;
+  }
+
+  function hasObsidianReadingContext(context) {
+    return Boolean(
+      context &&
+        (String(context.context || "").trim() ||
+          String(context.question || "").trim()),
+    );
+  }
+
+  function buildBookNote(
+    existing,
+    book,
+    values,
+    obsidianAuthoritative,
+    updatedAt = nowIso(),
+  ) {
+    return {
+      book,
+      note: obsidianAuthoritative
+        ? String(existing.note || "")
+        : String(values.note || "").trim(),
+      status: String(values.status || "").trim(),
+      question: obsidianAuthoritative
+        ? String(existing.question || "")
+        : String(values.question || "").trim(),
+      updatedAt,
+    };
+  }
+
+  async function resolveObsidianCatalog({ render = true } = {}) {
+    if (!isCloudConfigured()) return null;
+    state.catalogLoading = true;
+    if (render) renderPanel();
+
+    try {
+      const config = { ...state.cloudConfig };
+      const path = `/api/v2/libraries/${encodeURIComponent(config.key)}/obsidian/resolve`;
+      const result = await cloudApiRequest("POST", config, path, {
+        schemaVersion: CLOUD_SCHEMA_VERSION,
+        shelfBooks: state.books.map((book) => ({ id: book.id, title: book.title })),
+      });
+      state.obsidianCache = {
+        books: Array.isArray(result.body.books) ? result.body.books : [],
+        contexts:
+          result.body.contexts && typeof result.body.contexts === "object"
+            ? result.body.contexts
+            : {},
+        stats: result.body.stats || null,
+        resolvedAt: result.body.resolvedAt || nowIso(),
+        cached: false,
+        error: "",
+      };
+      await dbSet(STORE.obsidianCache, state.obsidianCache);
+      renderBookNoteIcons();
+      return state.obsidianCache;
+    } catch (error) {
+      state.obsidianCache.cached = true;
+      state.obsidianCache.error = error.message;
+      throw error;
+    } finally {
+      state.catalogLoading = false;
+      if (render) renderPanel();
     }
   }
 
   async function performCloudSync() {
     const config = { ...state.cloudConfig };
     const syncStartedLocalUpdatedAt = state.syncMeta.localUpdatedAt;
-    const readResult = await cloudRequest("GET", config);
-    let remotePayload = null;
+    const path = `/api/v2/libraries/${encodeURIComponent(config.key)}/weread/sync`;
+    const result = await cloudApiRequest("POST", config, path, {
+      schemaVersion: CLOUD_SCHEMA_VERSION,
+      deviceId: state.syncMeta.deviceId,
+      groups: state.groups,
+      notes: state.notes,
+      tombstones: state.syncMeta.tombstones,
+    });
+    await applyWereadSyncResponse(result.body);
 
-    if (readResult.status !== 404) {
-      remotePayload = normalizeCloudPayload(readResult.body.value);
-      await applyMergedCloudData(remotePayload);
-    }
-
-    const localCore = cloudDataCore(
-      state.groups,
-      state.notes,
-      state.syncMeta.tombstones,
-    );
-    const remoteCore = remotePayload
-      ? cloudDataCore(
-          remotePayload.data.groups,
-          remotePayload.data.notes,
-          remotePayload.tombstones,
-        )
-      : null;
-    const shouldPush =
-      !remoteCore || JSON.stringify(localCore) !== JSON.stringify(remoteCore);
-
-    if (shouldPush) {
-      await cloudRequest("PUT", config, { value: buildCloudPayload() });
+    try {
+      await resolveObsidianCatalog({ render: false });
+    } catch (error) {
+      console.warn("[WeRead Local Topic Shelf] Obsidian catalog refresh failed:", error);
     }
 
     state.syncMeta.dirty =
@@ -866,6 +790,30 @@
         flex-wrap: wrap;
       }
 
+      .wr-topic-tabs {
+        display: flex;
+        gap: 18px;
+        margin-top: 16px;
+        border-bottom: 1px solid var(--wr-topic-border);
+      }
+
+      .wr-topic-tab {
+        min-height: 34px;
+        border: 0;
+        border-bottom: 2px solid transparent;
+        padding: 0 2px;
+        background: transparent;
+        color: var(--wr-topic-muted);
+        font-size: 13px;
+        cursor: pointer;
+      }
+
+      .wr-topic-tab.active {
+        border-bottom-color: var(--wr-topic-blue);
+        color: var(--wr-topic-text);
+        font-weight: 650;
+      }
+
       .wr-topic-toolbar-spacer {
         flex: 1 1 auto;
       }
@@ -1025,6 +973,152 @@
         font-size: 12px;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+
+      .wr-topic-catalog {
+        height: 100%;
+        overflow-x: hidden;
+        overflow-y: auto;
+        padding: 22px 26px 30px;
+        background: #fbfbfa;
+      }
+
+      .wr-topic-catalog-head,
+      .wr-topic-catalog-controls,
+      .wr-topic-catalog-stats {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .wr-topic-catalog-head {
+        justify-content: space-between;
+        margin-bottom: 16px;
+      }
+
+      .wr-topic-catalog-head p {
+        margin: 4px 0 0;
+        font-size: 12px;
+      }
+
+      .wr-topic-catalog-stats {
+        margin-bottom: 16px;
+      }
+
+      .wr-topic-catalog-stat {
+        min-width: 112px;
+        border-left: 3px solid #cad1dc;
+        padding: 6px 10px;
+        background: #fff;
+      }
+
+      .wr-topic-catalog-stat strong,
+      .wr-topic-catalog-stat span {
+        display: block;
+      }
+
+      .wr-topic-catalog-stat strong {
+        font-size: 18px;
+      }
+
+      .wr-topic-catalog-stat span {
+        margin-top: 2px;
+        color: var(--wr-topic-muted);
+        font-size: 11px;
+      }
+
+      .wr-topic-catalog-controls {
+        margin-bottom: 14px;
+      }
+
+      .wr-topic-catalog-search {
+        flex: 1 1 260px;
+        max-width: 420px;
+      }
+
+      .wr-topic-catalog-filter.active {
+        border-color: var(--wr-topic-blue);
+        color: var(--wr-topic-blue);
+        background: rgba(47, 128, 237, .06);
+      }
+
+      .wr-topic-catalog-list {
+        border-top: 1px solid var(--wr-topic-border);
+      }
+
+      .wr-topic-catalog-row {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 16px;
+        padding: 13px 4px;
+        border-bottom: 1px solid var(--wr-topic-border);
+      }
+
+      .wr-topic-catalog-row > div:first-child {
+        min-width: 0;
+      }
+
+      .wr-topic-catalog-title,
+      .wr-topic-catalog-match {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .wr-topic-catalog-title {
+        color: var(--wr-topic-text);
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .wr-topic-catalog-match {
+        margin-top: 4px;
+        color: var(--wr-topic-muted);
+        font-size: 12px;
+      }
+
+      .wr-topic-catalog-badges {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+
+      .wr-topic-badge {
+        border-radius: 4px;
+        padding: 3px 7px;
+        background: #edf1f7;
+        color: #526070;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+
+      .wr-topic-badge.in-shelf {
+        background: #e8f6ee;
+        color: #237a4b;
+      }
+
+      .wr-topic-badge.has-context {
+        background: #fff3d6;
+        color: #8a5b00;
+      }
+
+      .wr-topic-source-note {
+        margin: 0 0 12px !important;
+        border-left: 3px solid var(--wr-topic-blue);
+        padding: 8px 10px;
+        background: #eef5ff;
+        color: #315b89 !important;
+        font-size: 12px;
+      }
+
+      .wr-topic-input[readonly],
+      .wr-topic-textarea[readonly] {
+        background: #f5f7fa;
+        color: #344054;
+        cursor: default;
       }
 
       .wr-topic-empty {
@@ -1385,6 +1479,15 @@
           border-right: 0;
           border-bottom: 1px solid var(--wr-topic-border);
         }
+
+        .wr-topic-catalog-row {
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+
+        .wr-topic-catalog-badges {
+          justify-content: flex-start;
+        }
       }
     `;
 
@@ -1615,7 +1718,9 @@
     document.querySelectorAll(SELECTORS.shelfBook).forEach((link) => {
       const book = extractBook(link);
       if (!book.id) return;
-      const hasContext = hasReadingContext(notes[book.id]);
+      const hasContext =
+        hasObsidianReadingContext(getObsidianContext(book.id)) ||
+        hasReadingContext(notes[book.id]);
 
       let icon = link.querySelector(".wr-book-context-icon");
       if (!icon) {
@@ -1779,6 +1884,106 @@
     `;
   }
 
+  function catalogBooks() {
+    const query = state.catalogQuery.trim().toLocaleLowerCase();
+    return (state.obsidianCache.books || [])
+      .filter((book) => {
+        if (state.catalogFilter === "in" && !book.inShelf) return false;
+        if (state.catalogFilter === "out" && book.inShelf) return false;
+        if (!query) return true;
+        return `${book.sourceTitle || ""} ${book.matchTitle || ""}`
+          .toLocaleLowerCase()
+          .includes(query);
+      })
+      .sort((left, right) => {
+        if (left.inShelf !== right.inShelf) return left.inShelf ? -1 : 1;
+        return String(left.sourceTitle || "").localeCompare(
+          String(right.sourceTitle || ""),
+          "zh-CN",
+        );
+      });
+  }
+
+  function catalogListHtml() {
+    const books = catalogBooks();
+    if (!books.length) {
+      const message = (state.obsidianCache.books || []).length
+        ? "没有符合当前筛选条件的书目。"
+        : "还没有 Obsidian 书目数据，请先在 Obsidian 中同步。";
+      return `<div class="wr-topic-empty">${message}</div>`;
+    }
+
+    return books
+      .map(
+        (book) => `
+          <div class="wr-topic-catalog-row">
+            <div>
+              <div class="wr-topic-catalog-title" title="${escapeHtml(book.sourceTitle || book.matchTitle)}">${escapeHtml(book.sourceTitle || book.matchTitle)}</div>
+              <div class="wr-topic-catalog-match" title="${escapeHtml(book.matchTitle || "")}">匹配书名：${escapeHtml(book.matchTitle || "未设置")}</div>
+            </div>
+            <div class="wr-topic-catalog-badges">
+              ${book.hasContext ? '<span class="wr-topic-badge has-context">WHY</span>' : ""}
+              <span class="wr-topic-badge ${book.inShelf ? "in-shelf" : ""}">${book.inShelf ? "在书架" : "不在书架"}</span>
+            </div>
+          </div>
+        `,
+      )
+      .join("");
+  }
+
+  function renderCatalogView() {
+    const stats = state.obsidianCache.stats || {
+      total: (state.obsidianCache.books || []).length,
+      inShelf: (state.obsidianCache.books || []).filter((book) => book.inShelf)
+        .length,
+      notInShelf: (state.obsidianCache.books || []).filter(
+        (book) => !book.inShelf,
+      ).length,
+      withContext: (state.obsidianCache.books || []).filter(
+        (book) => book.hasContext,
+      ).length,
+      recognizedShelfBooks: state.books.length,
+    };
+    const sourceLabel = state.obsidianCache.resolvedAt
+      ? `${state.obsidianCache.cached ? "缓存于" : "更新于"} ${new Date(state.obsidianCache.resolvedAt).toLocaleString("zh-CN")}`
+      : "尚未获取 Obsidian 书目";
+
+    return `
+      <section class="wr-topic-catalog">
+        <div class="wr-topic-catalog-head">
+          <div>
+            <h3>Obsidian 书目匹配</h3>
+            <p>${escapeHtml(sourceLabel)}${state.obsidianCache.error ? `；刷新失败：${escapeHtml(state.obsidianCache.error)}` : ""}</p>
+          </div>
+          <div class="wr-topic-catalog-controls">
+            <button class="wr-topic-btn" type="button" data-wr-action="refresh-catalog" ${state.catalogLoading ? "disabled" : ""}>${state.catalogLoading ? "正在刷新..." : "刷新匹配"}</button>
+            <button class="wr-topic-btn primary" type="button" data-wr-action="scan-catalog" ${state.catalogLoading ? "disabled" : ""}>扫描完整书架并刷新</button>
+          </div>
+        </div>
+        <div class="wr-topic-catalog-stats">
+          <div class="wr-topic-catalog-stat"><strong>${Number(stats.recognizedShelfBooks || state.books.length)}</strong><span>当前识别书籍</span></div>
+          <div class="wr-topic-catalog-stat"><strong>${Number(stats.inShelf || 0)}</strong><span>在微信书架</span></div>
+          <div class="wr-topic-catalog-stat"><strong>${Number(stats.notInShelf || 0)}</strong><span>不在微信书架</span></div>
+          <div class="wr-topic-catalog-stat"><strong>${Number(stats.withContext || 0)}</strong><span>包含 WHY</span></div>
+        </div>
+        <div class="wr-topic-catalog-controls">
+          <input class="wr-topic-input wr-topic-catalog-search" type="search" data-wr-action="filter-catalog" placeholder="搜索 Obsidian 书名或匹配书名" value="${escapeHtml(state.catalogQuery)}" autocomplete="off">
+          ${[
+            ["all", "全部"],
+            ["in", "在书架"],
+            ["out", "不在书架"],
+          ]
+            .map(
+              ([value, label]) =>
+                `<button class="wr-topic-btn wr-topic-catalog-filter ${state.catalogFilter === value ? "active" : ""}" type="button" data-wr-action="catalog-filter" data-filter="${value}">${label}</button>`,
+            )
+            .join("")}
+        </div>
+        <div class="wr-topic-catalog-list" data-wr-catalog-list>${catalogListHtml()}</div>
+      </section>
+    `;
+  }
+
   function suggestedCloudKey() {
     const suffix =
       window.crypto && typeof window.crypto.randomUUID === "function"
@@ -1932,17 +2137,25 @@
               <button class="wr-topic-btn" type="button" data-wr-action="sync-cloud">${text.syncNow}</button>
               <button class="wr-topic-btn" type="button" data-wr-action="open-cloud-settings">${text.cloudSync}</button>
             </div>
+            <div class="wr-topic-tabs" role="tablist">
+              <button class="wr-topic-tab ${state.panelTab === "groups" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "groups"}" data-wr-action="switch-tab" data-tab="groups">${text.groups}</button>
+              <button class="wr-topic-tab ${state.panelTab === "catalog" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "catalog"}" data-wr-action="switch-tab" data-tab="catalog">${text.catalog}</button>
+            </div>
           </header>
-          <div class="wr-topic-panel-body">
-            <section class="wr-topic-sidebar">
-              <div class="wr-topic-count">${text.recognized(state.books.length)}</div>
-              <h3>${text.groups}</h3>
-              ${renderGroupList(groups)}
-            </section>
-            <section class="wr-topic-detail">
-              ${renderGroupDetail(current)}
-            </section>
-          </div>
+          ${
+            state.panelTab === "catalog"
+              ? renderCatalogView()
+              : `<div class="wr-topic-panel-body">
+                  <section class="wr-topic-sidebar">
+                    <div class="wr-topic-count">${text.recognized(state.books.length)}</div>
+                    <h3>${text.groups}</h3>
+                    ${renderGroupList(groups)}
+                  </section>
+                  <section class="wr-topic-detail">
+                    ${renderGroupDetail(current)}
+                  </section>
+                </div>`
+          }
         </aside>
       </div>
     `;
@@ -2087,6 +2300,12 @@
 
     const notes = getNotes();
     const note = notes[bookId] || { note: "", status: "", question: "" };
+    const obsidian = getObsidianContext(bookId);
+    const obsidianAuthoritative = hasObsidianReadingContext(obsidian);
+    const contextValue = obsidianAuthoritative ? obsidian.context : note.note;
+    const questionValue = obsidianAuthoritative
+      ? obsidian.question
+      : note.question;
 
     const modal = document.createElement("div");
     modal.className = "wr-topic-modal";
@@ -2104,10 +2323,11 @@
             <span class="wr-topic-book-author">${escapeHtml(book.author)}</span>
           </div>
         </div>
-        <form class="wr-topic-form" data-wr-form="note" data-book-id="${escapeHtml(bookId)}">
+        <form class="wr-topic-form" data-wr-form="note" data-book-id="${escapeHtml(bookId)}" data-obsidian-authoritative="${obsidianAuthoritative ? "1" : "0"}">
+          ${obsidianAuthoritative ? `<p class="wr-topic-source-note">阅读上下文和阅读问题来自 Obsidian，只读展示。原有本地内容仍被保留。</p>` : ""}
           <div class="wr-topic-field">
             <label for="wr-note-main">${text.whyRead}</label>
-            <textarea id="wr-note-main" class="wr-topic-textarea" name="note">${escapeHtml(note.note || "")}</textarea>
+            <textarea id="wr-note-main" class="wr-topic-textarea" name="note" ${obsidianAuthoritative ? "readonly" : ""}>${escapeHtml(contextValue || "")}</textarea>
           </div>
           <div class="wr-topic-field">
             <label for="wr-note-status">${text.status}</label>
@@ -2115,10 +2335,10 @@
           </div>
           <div class="wr-topic-field">
             <label for="wr-note-question">${text.question}</label>
-            <textarea id="wr-note-question" class="wr-topic-textarea" name="question">${escapeHtml(note.question || "")}</textarea>
+            <textarea id="wr-note-question" class="wr-topic-textarea" name="question" ${obsidianAuthoritative ? "readonly" : ""}>${escapeHtml(questionValue || "")}</textarea>
           </div>
           <div class="wr-topic-modal-actions">
-            <button class="wr-topic-btn danger" type="button" data-wr-action="delete-book-note" data-book-id="${escapeHtml(bookId)}">${text.deleteNote}</button>
+            <button class="wr-topic-btn danger" type="button" data-wr-action="delete-book-note" data-book-id="${escapeHtml(bookId)}">${obsidianAuthoritative ? "清除本地状态" : text.deleteNote}</button>
             <button class="wr-topic-btn primary" type="submit">${text.save}</button>
           </div>
         </form>
@@ -2138,13 +2358,18 @@
     if (!book) return;
 
     const notes = getNotes();
-    notes[bookId] = {
+    const existing = notes[bookId] || { note: "", question: "" };
+    const obsidianAuthoritative = form.dataset.obsidianAuthoritative === "1";
+    notes[bookId] = buildBookNote(
+      existing,
       book,
-      note: form.elements.note.value.trim(),
-      status: form.elements.status.value.trim(),
-      question: form.elements.question.value.trim(),
-      updatedAt: new Date().toISOString(),
-    };
+      {
+        note: form.elements.note.value,
+        status: form.elements.status.value,
+        question: form.elements.question.value,
+      },
+      obsidianAuthoritative,
+    );
 
     if (
       !notes[bookId].note &&
@@ -2237,6 +2462,7 @@
     )
       closePanel();
     if (action === "new-group") {
+      state.panelTab = "groups";
       state.formMode = "new";
       state.editingGroupId = "";
       state.selectedBookIds = new Set();
@@ -2245,6 +2471,44 @@
     }
     if (action === "refresh-shelf") refreshShelf();
     if (action === "load-full-shelf") autoLoadFullShelf();
+    if (action === "switch-tab") {
+      state.panelTab = actionEl.dataset.tab === "catalog" ? "catalog" : "groups";
+      renderPanel();
+    }
+    if (action === "catalog-filter") {
+      state.catalogFilter = actionEl.dataset.filter || "all";
+      renderPanel();
+    }
+    if (action === "refresh-catalog") {
+      if (!isCloudConfigured()) {
+        alert("请先配置并启用 Cloudflare KV 云同步。");
+        openCloudSettings();
+      } else {
+        try {
+          await resolveObsidianCatalog();
+        } catch (error) {
+          alert(`刷新书目匹配失败：${error.message}`);
+        }
+      }
+    }
+    if (action === "scan-catalog") {
+      if (!isCloudConfigured()) {
+        alert("请先配置并启用 Cloudflare KV 云同步。");
+        openCloudSettings();
+      } else {
+        state.catalogLoading = true;
+        renderPanel();
+        try {
+          await autoLoadFullShelf();
+          await resolveObsidianCatalog({ render: false });
+        } catch (error) {
+          alert(`扫描或刷新失败：${error.message}`);
+        } finally {
+          state.catalogLoading = false;
+          renderPanel();
+        }
+      }
+    }
     if (action === "select-group" || action === "open-group") {
       state.selectedGroupId = actionEl.dataset.groupId;
       state.formMode = "";
@@ -2310,11 +2574,20 @@
   }
 
   function onInput(event) {
-    const actionEl = event.target.closest('[data-wr-action="filter-books"]');
+    const actionEl = event.target.closest(
+      '[data-wr-action="filter-books"], [data-wr-action="filter-catalog"]',
+    );
     if (!actionEl) return;
 
-    state.bookFilter = actionEl.value || "";
-    updateBookPicker();
+    if (actionEl.dataset.wrAction === "filter-books") {
+      state.bookFilter = actionEl.value || "";
+      updateBookPicker();
+      return;
+    }
+
+    state.catalogQuery = actionEl.value || "";
+    const list = document.querySelector("[data-wr-catalog-list]");
+    if (list) list.innerHTML = catalogListHtml();
   }
 
   function onKeydown(event) {
