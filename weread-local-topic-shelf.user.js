@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.0
+// @version      0.3.1
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -64,7 +64,7 @@
     cloudPushTimer: 0,
     lastCloudPullAt: 0,
     panelTab: "groups",
-    catalogFilter: "all",
+    catalogFilter: "in",
     catalogQuery: "",
     catalogLoading: false,
     obsidianCache: {
@@ -1047,6 +1047,15 @@
         border-top: 1px solid var(--wr-topic-border);
       }
 
+      .wr-topic-catalog-book-list {
+        margin-top: 14px;
+        padding-bottom: 14px;
+      }
+
+      .wr-topic-catalog-book-list + .wr-topic-catalog-row {
+        border-top: 1px solid var(--wr-topic-border);
+      }
+
       .wr-topic-catalog-row {
         min-width: 0;
         display: grid;
@@ -1453,10 +1462,13 @@
 
       .wr-book-context-icon.has-note {
         opacity: 1;
-        background: var(--wr-topic-orange);
+        background: var(--wr-topic-blue);
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 16px;
+        font-weight: 700;
         box-shadow:
           0 0 0 2px rgba(255, 255, 255, .95),
-          0 6px 16px rgba(245, 158, 11, .45),
+          0 6px 16px rgba(47, 128, 237, .4),
           0 2px 6px rgba(0, 0, 0, .22);
       }
 
@@ -1733,7 +1745,9 @@
       }
 
       icon.dataset.bookId = book.id;
-      icon.textContent = hasContext ? "✓" : "+";
+      icon.textContent = hasContext ? "i" : "+";
+      icon.title = hasContext ? "查看阅读信息" : "添加阅读信息";
+      icon.setAttribute("aria-label", icon.title);
       icon.classList.toggle("has-note", hasContext);
       link.classList.toggle("wr-book-has-context", hasContext);
     });
@@ -1913,22 +1927,62 @@
       return `<div class="wr-topic-empty">${message}</div>`;
     }
 
-    return books
-      .map(
-        (book) => `
+    const seenShelfBookIds = new Set();
+    const shelfBooks = [];
+    const rows = [];
+
+    books.forEach((catalogBook) => {
+      if (catalogBook.inShelf) {
+        let resolvedShelfBook = false;
+        (catalogBook.matchedShelfBookIds || []).forEach((bookId) => {
+          const shelfBook = findBook(bookId);
+          if (!shelfBook) return;
+          resolvedShelfBook = true;
+          if (seenShelfBookIds.has(bookId)) return;
+          seenShelfBookIds.add(bookId);
+          shelfBooks.push(shelfBook);
+        });
+        if (resolvedShelfBook) return;
+      }
+
+      rows.push(`
           <div class="wr-topic-catalog-row">
             <div>
-              <div class="wr-topic-catalog-title" title="${escapeHtml(book.sourceTitle || book.matchTitle)}">${escapeHtml(book.sourceTitle || book.matchTitle)}</div>
-              <div class="wr-topic-catalog-match" title="${escapeHtml(book.matchTitle || "")}">匹配书名：${escapeHtml(book.matchTitle || "未设置")}</div>
+              <div class="wr-topic-catalog-title" title="${escapeHtml(catalogBook.sourceTitle || catalogBook.matchTitle)}">${escapeHtml(catalogBook.sourceTitle || catalogBook.matchTitle)}</div>
+              <div class="wr-topic-catalog-match" title="${escapeHtml(catalogBook.matchTitle || "")}">匹配书名：${escapeHtml(catalogBook.matchTitle || "未设置")}</div>
             </div>
             <div class="wr-topic-catalog-badges">
-              ${book.hasContext ? '<span class="wr-topic-badge has-context">WHY</span>' : ""}
-              <span class="wr-topic-badge ${book.inShelf ? "in-shelf" : ""}">${book.inShelf ? "在书架" : "不在书架"}</span>
+              ${catalogBook.hasContext ? '<span class="wr-topic-badge has-context">WHY</span>' : ""}
+              <span class="wr-topic-badge ${catalogBook.inShelf ? "in-shelf" : ""}">${catalogBook.inShelf ? "在书架" : "不在书架"}</span>
             </div>
           </div>
-        `,
-      )
-      .join("");
+        `);
+    });
+
+    const shelfCards = shelfBooks.length
+      ? `<div class="wr-topic-book-list wr-topic-catalog-book-list">
+          ${shelfBooks
+            .map(
+              (book) => `
+                <div class="wr-topic-book-row">
+                  <button class="wr-topic-book-main wr-topic-btn ghost" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}">
+                    <img class="wr-topic-book-cover" src="${escapeHtml(book.cover)}" alt="">
+                    <span class="wr-topic-book-info">
+                      <span class="wr-topic-book-title" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</span>
+                      <span class="wr-topic-book-author">${escapeHtml(book.author)}</span>
+                    </span>
+                  </button>
+                  <div class="wr-topic-book-actions">
+                    <button class="wr-topic-btn" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}">${text.note}</button>
+                  </div>
+                </div>
+              `,
+            )
+            .join("")}
+        </div>`
+      : "";
+
+    return `${shelfCards}${rows.join("")}`;
   }
 
   function renderCatalogView() {
@@ -1957,7 +2011,6 @@
           </div>
           <div class="wr-topic-catalog-controls">
             <button class="wr-topic-btn" type="button" data-wr-action="refresh-catalog" ${state.catalogLoading ? "disabled" : ""}>${state.catalogLoading ? "正在刷新..." : "刷新匹配"}</button>
-            <button class="wr-topic-btn primary" type="button" data-wr-action="scan-catalog" ${state.catalogLoading ? "disabled" : ""}>扫描完整书架并刷新</button>
           </div>
         </div>
         <div class="wr-topic-catalog-stats">
@@ -2488,24 +2541,6 @@
           await resolveObsidianCatalog();
         } catch (error) {
           alert(`刷新书目匹配失败：${error.message}`);
-        }
-      }
-    }
-    if (action === "scan-catalog") {
-      if (!isCloudConfigured()) {
-        alert("请先配置并启用 Cloudflare KV 云同步。");
-        openCloudSettings();
-      } else {
-        state.catalogLoading = true;
-        renderPanel();
-        try {
-          await autoLoadFullShelf();
-          await resolveObsidianCatalog({ render: false });
-        } catch (error) {
-          alert(`扫描或刷新失败：${error.message}`);
-        } finally {
-          state.catalogLoading = false;
-          renderPanel();
         }
       }
     }
