@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.2.3
+// @version      0.2.4
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -275,6 +275,15 @@
 
   function getNotes() {
     return state.notes;
+  }
+
+  function hasReadingContext(note) {
+    return Boolean(
+      note &&
+        ["note", "status", "question"].some((field) =>
+          String(note[field] || "").trim(),
+        ),
+    );
   }
 
   async function saveNotes(notes) {
@@ -1308,7 +1317,12 @@
       }
 
       .wr-topic-shelf-group {
+        order: -2 !important;
         cursor: pointer;
+      }
+
+      .shelfBook.wr-book-has-context {
+        order: -1 !important;
       }
 
       .wr-topic-folder-title {
@@ -1601,6 +1615,7 @@
     document.querySelectorAll(SELECTORS.shelfBook).forEach((link) => {
       const book = extractBook(link);
       if (!book.id) return;
+      const hasContext = hasReadingContext(notes[book.id]);
 
       let icon = link.querySelector(".wr-book-context-icon");
       if (!icon) {
@@ -1613,8 +1628,9 @@
       }
 
       icon.dataset.bookId = book.id;
-      icon.textContent = notes[book.id] ? "✓" : "+";
-      icon.classList.toggle("has-note", Boolean(notes[book.id]));
+      icon.textContent = hasContext ? "✓" : "+";
+      icon.classList.toggle("has-note", hasContext);
+      link.classList.toggle("wr-book-has-context", hasContext);
     });
   }
 
