@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.2.1
+// @version      0.2.3
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
+// @updateURL    https://github.com/yuenci/weread-shelf/raw/refs/heads/master/weread-local-topic-shelf.user.js
+// @downloadURL  https://github.com/yuenci/weread-shelf/raw/refs/heads/master/weread-local-topic-shelf.user.js
 // @grant        GM_xmlhttpRequest
 // @connect      workers.dev
 // ==/UserScript==
@@ -916,19 +918,23 @@
 
       .wr-topic-panel-body {
         min-height: 0;
+        min-width: 0;
         flex: 1;
         display: grid;
         grid-template-columns: 320px minmax(0, 1fr);
+        overflow: hidden;
       }
 
       .wr-topic-sidebar,
       .wr-topic-detail {
         min-height: 0;
+        min-width: 0;
         padding: 22px 24px;
       }
 
       .wr-topic-sidebar {
-        overflow: auto;
+        overflow-x: hidden;
+        overflow-y: auto;
       }
 
       .wr-topic-detail {
@@ -949,13 +955,20 @@
       }
 
       .wr-topic-group-list {
+        width: 100%;
+        min-width: 0;
         display: grid;
         gap: 10px;
       }
 
       .wr-topic-group-card {
         width: 100%;
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
+        box-sizing: border-box;
         text-align: left;
+        white-space: normal;
         border: 1px solid var(--wr-topic-border);
         border-radius: 8px;
         padding: 13px;
@@ -971,13 +984,18 @@
 
       .wr-topic-group-name {
         display: block;
+        max-width: 100%;
+        overflow: hidden;
         color: var(--wr-topic-text);
         font-weight: 650;
         line-height: 1.35;
+        overflow-wrap: anywhere;
+        white-space: normal;
       }
 
       .wr-topic-group-desc {
         display: -webkit-box;
+        max-width: 100%;
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
@@ -985,13 +1003,19 @@
         color: var(--wr-topic-muted);
         font-size: 12px;
         line-height: 1.5;
+        overflow-wrap: anywhere;
+        white-space: normal;
       }
 
       .wr-topic-group-meta {
         display: block;
+        max-width: 100%;
+        overflow: hidden;
         margin-top: 8px;
         color: #8a94a6;
         font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .wr-topic-empty {
