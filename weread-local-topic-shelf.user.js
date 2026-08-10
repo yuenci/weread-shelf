@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.1
+// @version      0.3.2
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -1194,7 +1194,7 @@
       }
 
       .wr-topic-textarea {
-        min-height: 96px;
+        min-height: 126px;
         resize: vertical;
       }
 
