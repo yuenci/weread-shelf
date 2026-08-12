@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.5
+// @version      0.3.6
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -642,6 +642,23 @@
       .replace(/'/g, "&#039;");
   }
 
+  function iconSvg(name, className = "wr-topic-icon") {
+    const icons = {
+      cloud:
+        '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>',
+      info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+      library:
+        '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
+      plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+      refresh:
+        '<path d="M21 12a9 9 0 0 0-15.17-6.55L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.17 6.55L21 16"/><path d="M16 16h5v5"/>',
+      trash:
+        '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/>',
+      x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    };
+    return `<svg class="${escapeHtml(className)}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || ""}</svg>`;
+  }
+
   function cssEscape(value) {
     if (window.CSS && typeof window.CSS.escape === "function") {
       return window.CSS.escape(value);
@@ -758,6 +775,13 @@
         box-sizing: border-box;
       }
 
+      .wr-topic-icon {
+        width: 16px;
+        height: 16px;
+        display: block;
+        flex: 0 0 auto;
+      }
+
       .wr-topic-panel-header {
         position: relative;
         padding: 22px 26px 16px;
@@ -867,17 +891,17 @@
       }
 
       .wr-topic-sync-group .wr-topic-sync-status {
-        min-height: 34px;
+        min-height: 30px;
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        padding: 0 11px;
+        gap: 5px;
+        padding: 0 9px;
       }
 
       .wr-topic-sync-dot {
-        flex: 0 0 6px;
-        width: 6px;
-        height: 6px;
+        flex: 0 0 5px;
+        width: 5px;
+        height: 5px;
         border-radius: 999px;
         background: #98a2b3;
       }
@@ -896,16 +920,16 @@
       }
 
       .wr-topic-sync-action {
-        min-height: 34px;
+        min-height: 30px;
         display: inline-flex;
         align-items: center;
         gap: 5px;
         border: 0;
         border-left: 1px solid #e2e7ef;
-        padding: 0 11px;
+        padding: 0 9px;
         background: transparent;
         color: #344054;
-        font-size: 12px;
+        font-size: 11px;
         white-space: nowrap;
         cursor: pointer;
       }
@@ -1074,6 +1098,29 @@
         scrollbar-gutter: stable;
       }
 
+      .wr-topic-group-scroll,
+      .wr-topic-group-book-list {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(82, 96, 112, .48) transparent;
+      }
+
+      .wr-topic-group-scroll::-webkit-scrollbar,
+      .wr-topic-group-book-list::-webkit-scrollbar {
+        width: 4px;
+        height: 4px;
+      }
+
+      .wr-topic-group-scroll::-webkit-scrollbar-track,
+      .wr-topic-group-book-list::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .wr-topic-group-scroll::-webkit-scrollbar-thumb,
+      .wr-topic-group-book-list::-webkit-scrollbar-thumb {
+        border-radius: 999px;
+        background: rgba(82, 96, 112, .48);
+      }
+
       .wr-topic-sidebar-create {
         flex: 0 0 auto;
         margin-top: 12px;
@@ -1108,9 +1155,8 @@
       }
 
       .wr-topic-new-group-icon {
-        font-size: 24px;
-        font-weight: 400;
-        line-height: 1;
+        width: 19px;
+        height: 19px;
       }
 
       .wr-topic-group-list {
@@ -1489,7 +1535,13 @@
       }
 
       .wr-topic-group-book-list {
+        flex: 1 1 auto;
+        min-height: 0;
         grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+        align-content: start;
+        overflow-x: hidden;
+        overflow-y: auto;
+        padding-right: 6px;
       }
 
       .wr-topic-group-book-card {
@@ -1583,8 +1635,12 @@
         position: absolute;
         top: 8px;
         right: 8px;
+        width: 28px;
+        height: 28px;
         min-height: 28px;
-        padding: 0 8px;
+        display: grid;
+        place-items: center;
+        padding: 0;
         opacity: 0;
         pointer-events: none;
         transform: translateY(-2px);
@@ -1596,6 +1652,11 @@
         opacity: 1;
         pointer-events: auto;
         transform: translateY(0);
+      }
+
+      .wr-topic-group-book-remove .wr-topic-icon {
+        width: 14px;
+        height: 14px;
       }
 
       .wr-topic-modal {
@@ -1755,17 +1816,22 @@
         width: 26px;
         height: 26px;
         z-index: 999;
+        display: grid;
+        place-items: center;
         border-radius: 999px;
         border: 2px solid #fff;
+        padding: 0;
         background: var(--wr-topic-blue);
         color: #fff;
-        font-size: 15px;
-        line-height: 21px;
-        text-align: center;
         cursor: pointer;
         opacity: 0;
         box-shadow: 0 4px 12px rgba(0, 0, 0, .22);
         transition: opacity .16s ease, background .16s ease;
+      }
+
+      .wr-book-context-icon .wr-topic-icon {
+        width: 15px;
+        height: 15px;
       }
 
       .shelfBook:hover .wr-book-context-icon {
@@ -1775,9 +1841,6 @@
       .wr-book-context-icon.has-note {
         opacity: 1;
         background: var(--wr-topic-blue);
-        font-family: Georgia, "Times New Roman", serif;
-        font-size: 16px;
-        font-weight: 700;
         box-shadow:
           0 0 0 2px rgba(255, 255, 255, .95),
           0 6px 16px rgba(47, 128, 237, .4),
@@ -2107,7 +2170,7 @@
       }
 
       icon.dataset.bookId = book.id;
-      icon.textContent = hasContext ? "i" : "+";
+      icon.innerHTML = iconSvg(hasContext ? "info" : "plus");
       icon.title = hasContext ? "查看阅读信息" : "添加阅读信息";
       icon.setAttribute("aria-label", icon.title);
       icon.classList.toggle("has-note", hasContext);
@@ -2250,7 +2313,7 @@
                   <button class="wr-topic-group-book-title-action" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</button>
                   <button class="wr-topic-group-book-context ${context ? "" : "is-empty"}" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文">${escapeHtml(contextLabel)}</button>
                 </div>
-                <button class="wr-topic-btn danger wr-topic-group-book-remove" type="button" data-wr-action="remove-book" data-group-id="${escapeHtml(group.id)}" data-book-id="${escapeHtml(book.id)}" title="从主题组移除">移除</button>
+                <button class="wr-topic-btn danger wr-topic-group-book-remove" type="button" data-wr-action="remove-book" data-group-id="${escapeHtml(group.id)}" data-book-id="${escapeHtml(book.id)}" title="从主题组移除" aria-label="从主题组移除">${iconSvg("trash")}</button>
               </article>
             `;
           })
@@ -2541,18 +2604,18 @@
                 <p>${text.panelSubTitle}</p>
               </div>
               <div class="wr-topic-shelf-tools" role="group" aria-label="书架工具">
-                <button class="wr-topic-header-tool" type="button" data-wr-action="refresh-shelf"><span class="wr-topic-header-tool-icon" aria-hidden="true">↻</span><span>刷新书架</span></button>
-                <button class="wr-topic-header-tool" type="button" data-wr-action="load-full-shelf"><span class="wr-topic-header-tool-icon" aria-hidden="true">▣</span><span>完整书架</span></button>
+                <button class="wr-topic-header-tool" type="button" data-wr-action="refresh-shelf">${iconSvg("refresh", "wr-topic-icon wr-topic-header-tool-icon")}<span>刷新书架</span></button>
+                <button class="wr-topic-header-tool" type="button" data-wr-action="load-full-shelf">${iconSvg("library", "wr-topic-icon wr-topic-header-tool-icon")}<span>完整书架</span></button>
               </div>
               <div class="wr-topic-header-actions">
                 <div class="wr-topic-sync-group" role="group" aria-label="云同步工具">
                   <span class="wr-topic-sync-status" data-wr-sync-status data-status-type="${escapeHtml(state.syncStatusType)}" title="${escapeHtml(state.syncStatus)}"><span class="wr-topic-sync-dot" aria-hidden="true"></span><span data-wr-sync-status-text>${escapeHtml(state.syncStatus)}</span></span>
-                  <button class="wr-topic-sync-action" type="button" data-wr-action="sync-cloud"><span aria-hidden="true">↕</span><span>${text.syncNow}</span></button>
-                  <button class="wr-topic-sync-action" type="button" data-wr-action="open-cloud-settings"><span aria-hidden="true">☁</span><span>${text.cloudSync}</span></button>
+                  <button class="wr-topic-sync-action" type="button" data-wr-action="sync-cloud">${iconSvg("refresh")}<span>${text.syncNow}</span></button>
+                  <button class="wr-topic-sync-action" type="button" data-wr-action="open-cloud-settings">${iconSvg("cloud")}<span>${text.cloudSync}</span></button>
                 </div>
               </div>
             </div>
-            <button class="wr-topic-close-btn" type="button" data-wr-action="close-panel" title="${text.close}" aria-label="${text.close}">×</button>
+            <button class="wr-topic-close-btn" type="button" data-wr-action="close-panel" title="${text.close}" aria-label="${text.close}">${iconSvg("x")}</button>
             <div class="wr-topic-tabs" role="tablist">
               <button class="wr-topic-tab ${state.panelTab === "groups" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "groups"}" data-wr-action="switch-tab" data-tab="groups">${text.groups}</button>
               <button class="wr-topic-tab ${state.panelTab === "catalog" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "catalog"}" data-wr-action="switch-tab" data-tab="catalog">${text.catalog}</button>
@@ -2570,7 +2633,7 @@
                     </div>
                     <div class="wr-topic-sidebar-create">
                       <button class="wr-topic-new-group-btn" type="button" data-wr-action="new-group">
-                        <span class="wr-topic-new-group-icon" aria-hidden="true">+</span>
+                        ${iconSvg("plus", "wr-topic-icon wr-topic-new-group-icon")}
                         <span>${text.newGroup}</span>
                       </button>
                     </div>
