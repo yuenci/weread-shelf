@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.8
+// @version      0.3.9
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -800,12 +800,9 @@
 
       .wr-topic-header-title {
         min-width: 0;
-      }
-
-      .wr-topic-header-title p {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        min-height: 32px;
+        display: flex;
+        align-items: center;
       }
 
       .wr-topic-panel-title-row,
@@ -827,6 +824,7 @@
 
       .wr-topic-panel h2 {
         font-size: 22px;
+        line-height: 32px;
       }
 
       .wr-topic-panel h3 {
@@ -840,6 +838,7 @@
       }
 
       .wr-topic-shelf-tools {
+        height: 32px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -847,7 +846,8 @@
       }
 
       .wr-topic-header-tool {
-        min-height: 34px;
+        height: 32px;
+        min-height: 32px;
         display: inline-flex;
         align-items: center;
         gap: 6px;
@@ -876,12 +876,15 @@
 
       .wr-topic-header-actions {
         min-width: 0;
+        height: 32px;
         display: flex;
+        align-items: center;
         justify-content: flex-end;
       }
 
       .wr-topic-sync-group {
         min-width: 0;
+        height: 32px;
         display: inline-flex;
         align-items: stretch;
         overflow: hidden;
@@ -1065,6 +1068,7 @@
         overflow: hidden;
         display: flex;
         flex-direction: column;
+        padding-bottom: 0;
       }
 
       .wr-topic-detail {
@@ -1714,6 +1718,13 @@
         display: grid;
         gap: 15px;
         margin-top: 18px;
+      }
+
+      .wr-topic-cloud-summary {
+        margin: 8px 0 0 !important;
+        color: var(--wr-topic-muted);
+        font-size: 12px;
+        line-height: 1.6;
       }
 
       .wr-topic-checkbox {
@@ -2496,6 +2507,7 @@
           <h3>${text.cloudSettingsTitle}</h3>
           <button class="wr-topic-btn" type="button" data-wr-action="close-cloud-settings">${text.close}</button>
         </div>
+        <p class="wr-topic-cloud-summary">${text.panelSubTitle}</p>
         <form class="wr-topic-cloud-form" data-wr-form="cloud">
           <label class="wr-topic-checkbox">
             <input type="checkbox" name="enabled" ${config.enabled ? "checked" : ""}>
@@ -2614,7 +2626,6 @@
             <div class="wr-topic-header-main">
               <div class="wr-topic-header-title">
                 <h2>${text.panelTitle}</h2>
-                <p>${text.panelSubTitle}</p>
               </div>
               <div class="wr-topic-shelf-tools" role="group" aria-label="书架工具">
                 <button class="wr-topic-header-tool" type="button" data-wr-action="refresh-shelf">${iconSvg("refresh", "wr-topic-icon wr-topic-header-tool-icon")}<span>刷新书架</span></button>
