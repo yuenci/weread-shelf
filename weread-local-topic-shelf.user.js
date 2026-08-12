@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.2
+// @version      0.3.3
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -495,6 +495,14 @@
         (String(context.context || "").trim() ||
           String(context.question || "").trim()),
     );
+  }
+
+  function getBookContextSummary(bookId) {
+    const obsidian = getObsidianContext(bookId);
+    if (hasObsidianReadingContext(obsidian)) {
+      return String(obsidian.context || "").trim();
+    }
+    return String((getNotes()[bookId] || {}).note || "").trim();
   }
 
   function buildBookNote(
@@ -1286,6 +1294,116 @@
         padding: 0 10px 10px;
       }
 
+      .wr-topic-group-book-list {
+        grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+      }
+
+      .wr-topic-group-book-card {
+        position: relative;
+        min-width: 0;
+        min-height: 148px;
+        display: grid;
+        grid-template-columns: 82px minmax(0, 1fr);
+        gap: 12px;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 8px;
+        padding: 12px;
+        background: #fff;
+        transition: border-color .16s ease, box-shadow .16s ease;
+      }
+
+      .wr-topic-group-book-card:hover,
+      .wr-topic-group-book-card:focus-within {
+        border-color: rgba(47, 128, 237, .34);
+        box-shadow: 0 8px 22px rgba(15, 23, 42, .07);
+      }
+
+      .wr-topic-group-book-cover-action,
+      .wr-topic-group-book-title-action,
+      .wr-topic-group-book-context {
+        border: 0;
+        padding: 0;
+        background: transparent;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .wr-topic-group-book-cover-action {
+        align-self: start;
+      }
+
+      .wr-topic-group-book-cover {
+        display: block;
+        width: 82px;
+        height: 122px;
+        object-fit: cover;
+        border-radius: 4px;
+        background: #edf1f7;
+        box-shadow: 0 3px 10px rgba(15, 23, 42, .12);
+      }
+
+      .wr-topic-group-book-content {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .wr-topic-group-book-title-action {
+        max-width: 100%;
+        padding-right: 48px;
+        color: var(--wr-topic-text);
+        font-size: 13px;
+        font-weight: 650;
+        line-height: 1.4;
+      }
+
+      .wr-topic-group-book-title-action:hover {
+        color: var(--wr-topic-blue);
+      }
+
+      .wr-topic-group-book-context {
+        display: -webkit-box;
+        flex: 1;
+        min-height: 0;
+        margin-top: 8px;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 5;
+        overflow: hidden;
+        color: #526070;
+        font-size: 12px;
+        line-height: 1.55;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+
+      .wr-topic-group-book-context:hover {
+        color: #315b89;
+      }
+
+      .wr-topic-group-book-context.is-empty {
+        color: #8a94a6;
+      }
+
+      .wr-topic-group-book-remove {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        min-height: 28px;
+        padding: 0 8px;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(-2px);
+        transition: opacity .16s ease, transform .16s ease;
+      }
+
+      .wr-topic-group-book-card:hover .wr-topic-group-book-remove,
+      .wr-topic-group-book-card:focus-within .wr-topic-group-book-remove {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(0);
+      }
+
       .wr-topic-modal {
         position: fixed;
         inset: 0;
@@ -1499,6 +1617,18 @@
 
         .wr-topic-catalog-badges {
           justify-content: flex-start;
+        }
+
+        .wr-topic-group-book-list {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (hover: none) {
+        .wr-topic-group-book-remove {
+          opacity: 1;
+          pointer-events: auto;
+          transform: none;
         }
       }
     `;
@@ -1874,25 +2004,24 @@
         </div>
       </div>
       <div class="wr-topic-detail-desc">${escapeHtml(group.description || "暂无描述")}</div>
-      <div class="wr-topic-book-list">
+      <div class="wr-topic-book-list wr-topic-group-book-list">
         ${(group.books || [])
-          .map(
-            (book) => `
-          <div class="wr-topic-book-row">
-            <button class="wr-topic-book-main wr-topic-btn ghost" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}">
-              <img class="wr-topic-book-cover" src="${escapeHtml(book.cover)}" alt="">
-              <span class="wr-topic-book-info">
-                <span class="wr-topic-book-title" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</span>
-                <span class="wr-topic-book-author">${escapeHtml(book.author)}</span>
-              </span>
-            </button>
-            <div class="wr-topic-book-actions">
-              <button class="wr-topic-btn" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}">${text.note}</button>
-              <button class="wr-topic-btn" type="button" data-wr-action="remove-book" data-group-id="${escapeHtml(group.id)}" data-book-id="${escapeHtml(book.id)}">${text.remove}</button>
-            </div>
-          </div>
-        `,
-          )
+          .map((book) => {
+            const context = getBookContextSummary(book.id);
+            const contextLabel = context || "暂无阅读上下文，点击添加";
+            return `
+              <article class="wr-topic-group-book-card">
+                <button class="wr-topic-group-book-cover-action" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}" aria-label="进入阅读：${escapeHtml(book.title)}">
+                  <img class="wr-topic-group-book-cover" src="${escapeHtml(book.cover)}" alt="">
+                </button>
+                <div class="wr-topic-group-book-content">
+                  <button class="wr-topic-group-book-title-action" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</button>
+                  <button class="wr-topic-group-book-context ${context ? "" : "is-empty"}" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文">${escapeHtml(contextLabel)}</button>
+                </div>
+                <button class="wr-topic-btn danger wr-topic-group-book-remove" type="button" data-wr-action="remove-book" data-group-id="${escapeHtml(group.id)}" data-book-id="${escapeHtml(book.id)}" title="从主题组移除">移除</button>
+              </article>
+            `;
+          })
           .join("")}
       </div>
     `;
