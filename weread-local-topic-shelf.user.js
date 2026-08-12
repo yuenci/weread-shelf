@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.6
+// @version      0.3.7
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -1547,6 +1547,7 @@
       .wr-topic-group-book-card {
         position: relative;
         min-width: 0;
+        height: 148px;
         min-height: 148px;
         display: grid;
         grid-template-columns: 82px minmax(0, 1fr);
@@ -1554,6 +1555,7 @@
         border: 1px solid var(--wr-topic-border);
         border-radius: 8px;
         padding: 12px;
+        overflow: hidden;
         background: #fff;
         transition: border-color .16s ease, box-shadow .16s ease;
       }
@@ -1591,8 +1593,11 @@
 
       .wr-topic-group-book-content {
         min-width: 0;
+        height: 122px;
+        min-height: 0;
         display: flex;
         flex-direction: column;
+        overflow: hidden;
       }
 
       .wr-topic-group-book-title-action {
@@ -1610,15 +1615,16 @@
 
       .wr-topic-group-book-context {
         display: -webkit-box;
-        flex: 1;
+        flex: 1 1 0;
         min-height: 0;
+        max-width: 100%;
         margin-top: 8px;
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 5;
         overflow: hidden;
         color: #526070;
-        font-size: 12px;
-        line-height: 1.55;
+        font-size: 10px;
+        line-height: 1.5;
         overflow-wrap: anywhere;
         white-space: pre-wrap;
       }
