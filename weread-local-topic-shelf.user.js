@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.3
+// @version      0.3.5
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -328,8 +328,11 @@
     state.syncStatusType = type;
 
     document.querySelectorAll("[data-wr-sync-status]").forEach((element) => {
-      element.textContent = message;
+      const textElement = element.querySelector("[data-wr-sync-status-text]");
+      if (textElement) textElement.textContent = message;
+      else element.textContent = message;
       element.dataset.statusType = type;
+      element.title = message;
     });
   }
 
@@ -756,9 +759,29 @@
       }
 
       .wr-topic-panel-header {
+        position: relative;
         padding: 22px 26px 16px;
         border-bottom: 1px solid var(--wr-topic-border);
         background: #fff;
+      }
+
+      .wr-topic-header-main {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) auto minmax(300px, 1fr);
+        align-items: center;
+        gap: 20px;
+        padding-right: 32px;
+      }
+
+      .wr-topic-header-title {
+        min-width: 0;
+      }
+
+      .wr-topic-header-title p {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .wr-topic-panel-title-row,
@@ -792,10 +815,131 @@
         line-height: 1.6;
       }
 
-      .wr-topic-toolbar {
-        margin-top: 18px;
-        justify-content: flex-start;
-        flex-wrap: wrap;
+      .wr-topic-shelf-tools {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+      }
+
+      .wr-topic-header-tool {
+        min-height: 34px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 0;
+        border-radius: 6px;
+        padding: 0 9px;
+        background: transparent;
+        color: #344054;
+        font-size: 12px;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+
+      .wr-topic-header-tool:hover,
+      .wr-topic-header-tool:focus-visible {
+        background: #eef5ff;
+        color: var(--wr-topic-blue);
+        outline: none;
+      }
+
+      .wr-topic-header-tool-icon {
+        color: var(--wr-topic-blue);
+        font-size: 15px;
+        line-height: 1;
+      }
+
+      .wr-topic-header-actions {
+        min-width: 0;
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .wr-topic-sync-group {
+        min-width: 0;
+        display: inline-flex;
+        align-items: stretch;
+        overflow: hidden;
+        border: 1px solid #e9edf3;
+        border-radius: 999px;
+        background: #f7f9fc;
+      }
+
+      .wr-topic-sync-group .wr-topic-sync-status {
+        min-height: 34px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 11px;
+      }
+
+      .wr-topic-sync-dot {
+        flex: 0 0 6px;
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: #98a2b3;
+      }
+
+      .wr-topic-sync-status[data-status-type="success"] .wr-topic-sync-dot {
+        background: #22a447;
+      }
+
+      .wr-topic-sync-status[data-status-type="pending"] .wr-topic-sync-dot,
+      .wr-topic-sync-status[data-status-type="syncing"] .wr-topic-sync-dot {
+        background: #d79b00;
+      }
+
+      .wr-topic-sync-status[data-status-type="error"] .wr-topic-sync-dot {
+        background: #d92d20;
+      }
+
+      .wr-topic-sync-action {
+        min-height: 34px;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border: 0;
+        border-left: 1px solid #e2e7ef;
+        padding: 0 11px;
+        background: transparent;
+        color: #344054;
+        font-size: 12px;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+
+      .wr-topic-sync-action:hover,
+      .wr-topic-sync-action:focus-visible {
+        background: #eef5ff;
+        color: var(--wr-topic-blue);
+        outline: none;
+      }
+
+      .wr-topic-close-btn {
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        width: 32px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 6px;
+        padding: 0;
+        background: transparent;
+        color: #526070;
+        font-size: 22px;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .wr-topic-close-btn:hover,
+      .wr-topic-close-btn:focus-visible {
+        background: #f2f4f7;
+        color: #17202a;
+        outline: none;
       }
 
       .wr-topic-tabs {
@@ -820,10 +964,6 @@
         border-bottom-color: var(--wr-topic-blue);
         color: var(--wr-topic-text);
         font-weight: 650;
-      }
-
-      .wr-topic-toolbar-spacer {
-        flex: 1 1 auto;
       }
 
       .wr-topic-sync-status {
@@ -898,8 +1038,9 @@
       }
 
       .wr-topic-sidebar {
-        overflow-x: hidden;
-        overflow-y: auto;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
       }
 
       .wr-topic-detail {
@@ -917,6 +1058,59 @@
         margin: 0 0 16px;
         color: var(--wr-topic-muted);
         font-size: 13px;
+      }
+
+      .wr-topic-sidebar > h3 {
+        flex: 0 0 auto;
+        margin-bottom: 12px;
+      }
+
+      .wr-topic-group-scroll {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        padding: 2px 7px 8px 2px;
+        scrollbar-gutter: stable;
+      }
+
+      .wr-topic-sidebar-create {
+        flex: 0 0 auto;
+        margin-top: 12px;
+        padding: 10px 2px 2px;
+        border-top: 1px solid var(--wr-topic-border);
+        background: #fff;
+      }
+
+      .wr-topic-new-group-btn {
+        width: 100%;
+        min-height: 48px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 9px;
+        border: 1px solid rgba(47, 128, 237, .36);
+        border-radius: 7px;
+        background: #fff;
+        color: var(--wr-topic-blue);
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: border-color .16s ease, background .16s ease, color .16s ease;
+      }
+
+      .wr-topic-new-group-btn:hover,
+      .wr-topic-new-group-btn:focus-visible {
+        border-color: var(--wr-topic-blue);
+        background: var(--wr-topic-blue);
+        color: #fff;
+        outline: none;
+      }
+
+      .wr-topic-new-group-icon {
+        font-size: 24px;
+        font-weight: 400;
+        line-height: 1;
       }
 
       .wr-topic-group-list {
@@ -1598,6 +1792,44 @@
 
         .wr-topic-panel {
           width: 100vw;
+        }
+
+        .wr-topic-panel-header {
+          padding: 18px 26px 12px;
+        }
+
+        .wr-topic-header-main {
+          grid-template-columns: 1fr;
+          align-items: stretch;
+          gap: 10px;
+          padding-right: 0;
+        }
+
+        .wr-topic-header-title {
+          padding-right: 34px;
+        }
+
+        .wr-topic-shelf-tools {
+          justify-content: flex-start;
+        }
+
+        .wr-topic-header-actions {
+          justify-content: flex-start;
+        }
+
+        .wr-topic-sync-group {
+          max-width: 100%;
+        }
+
+        .wr-topic-sync-group .wr-topic-sync-status {
+          min-width: 0;
+          flex: 1 1 auto;
+        }
+
+        .wr-topic-sync-status [data-wr-sync-status-text] {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
 
         .wr-topic-panel-body {
@@ -2303,22 +2535,24 @@
       <div class="wr-topic-overlay" data-wr-action="close-panel">
         <aside class="wr-topic-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(text.panelTitle)}">
           <header class="wr-topic-panel-header">
-            <div class="wr-topic-panel-title-row">
-              <div>
+            <div class="wr-topic-header-main">
+              <div class="wr-topic-header-title">
                 <h2>${text.panelTitle}</h2>
                 <p>${text.panelSubTitle}</p>
               </div>
-              <button class="wr-topic-btn" type="button" data-wr-action="close-panel">${text.close}</button>
+              <div class="wr-topic-shelf-tools" role="group" aria-label="书架工具">
+                <button class="wr-topic-header-tool" type="button" data-wr-action="refresh-shelf"><span class="wr-topic-header-tool-icon" aria-hidden="true">↻</span><span>刷新书架</span></button>
+                <button class="wr-topic-header-tool" type="button" data-wr-action="load-full-shelf"><span class="wr-topic-header-tool-icon" aria-hidden="true">▣</span><span>完整书架</span></button>
+              </div>
+              <div class="wr-topic-header-actions">
+                <div class="wr-topic-sync-group" role="group" aria-label="云同步工具">
+                  <span class="wr-topic-sync-status" data-wr-sync-status data-status-type="${escapeHtml(state.syncStatusType)}" title="${escapeHtml(state.syncStatus)}"><span class="wr-topic-sync-dot" aria-hidden="true"></span><span data-wr-sync-status-text>${escapeHtml(state.syncStatus)}</span></span>
+                  <button class="wr-topic-sync-action" type="button" data-wr-action="sync-cloud"><span aria-hidden="true">↕</span><span>${text.syncNow}</span></button>
+                  <button class="wr-topic-sync-action" type="button" data-wr-action="open-cloud-settings"><span aria-hidden="true">☁</span><span>${text.cloudSync}</span></button>
+                </div>
+              </div>
             </div>
-            <div class="wr-topic-toolbar">
-              <button class="wr-topic-btn primary" type="button" data-wr-action="new-group">${text.newGroup}</button>
-              <button class="wr-topic-btn" type="button" data-wr-action="refresh-shelf">${text.refreshShelf}</button>
-              <button class="wr-topic-btn" type="button" data-wr-action="load-full-shelf">${text.loadFullShelf}</button>
-              <span class="wr-topic-toolbar-spacer"></span>
-              <span class="wr-topic-sync-status" data-wr-sync-status data-status-type="${escapeHtml(state.syncStatusType)}" title="${escapeHtml(state.syncStatus)}">${escapeHtml(state.syncStatus)}</span>
-              <button class="wr-topic-btn" type="button" data-wr-action="sync-cloud">${text.syncNow}</button>
-              <button class="wr-topic-btn" type="button" data-wr-action="open-cloud-settings">${text.cloudSync}</button>
-            </div>
+            <button class="wr-topic-close-btn" type="button" data-wr-action="close-panel" title="${text.close}" aria-label="${text.close}">×</button>
             <div class="wr-topic-tabs" role="tablist">
               <button class="wr-topic-tab ${state.panelTab === "groups" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "groups"}" data-wr-action="switch-tab" data-tab="groups">${text.groups}</button>
               <button class="wr-topic-tab ${state.panelTab === "catalog" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "catalog"}" data-wr-action="switch-tab" data-tab="catalog">${text.catalog}</button>
@@ -2331,7 +2565,15 @@
                   <section class="wr-topic-sidebar">
                     <div class="wr-topic-count">${text.recognized(state.books.length)}</div>
                     <h3>${text.groups}</h3>
-                    ${renderGroupList(groups)}
+                    <div class="wr-topic-group-scroll">
+                      ${renderGroupList(groups)}
+                    </div>
+                    <div class="wr-topic-sidebar-create">
+                      <button class="wr-topic-new-group-btn" type="button" data-wr-action="new-group">
+                        <span class="wr-topic-new-group-icon" aria-hidden="true">+</span>
+                        <span>${text.newGroup}</span>
+                      </button>
+                    </div>
                   </section>
                   <section class="wr-topic-detail">
                     ${renderGroupDetail(current)}
