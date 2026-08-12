@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.7
+// @version      0.3.8
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -1124,39 +1124,42 @@
       .wr-topic-sidebar-create {
         flex: 0 0 auto;
         margin-top: 12px;
-        padding: 10px 2px 2px;
+        padding: 0;
         border-top: 1px solid var(--wr-topic-border);
         background: #fff;
       }
 
       .wr-topic-new-group-btn {
         width: 100%;
-        min-height: 48px;
+        min-height: 44px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        gap: 9px;
-        border: 1px solid rgba(47, 128, 237, .36);
-        border-radius: 7px;
-        background: #fff;
-        color: var(--wr-topic-blue);
-        font-size: 14px;
-        font-weight: 600;
+        gap: 6px;
+        border: 0;
+        border-radius: 0;
+        padding: 0 10px;
+        background: transparent;
+        color: #7d8796;
+        font-size: 12px;
+        font-weight: 400;
         cursor: pointer;
-        transition: border-color .16s ease, background .16s ease, color .16s ease;
+        transition: color .16s ease;
       }
 
       .wr-topic-new-group-btn:hover,
       .wr-topic-new-group-btn:focus-visible {
-        border-color: var(--wr-topic-blue);
-        background: var(--wr-topic-blue);
-        color: #fff;
+        color: var(--wr-topic-blue);
         outline: none;
       }
 
+      .wr-topic-new-group-btn:focus-visible {
+        box-shadow: inset 0 0 0 1px rgba(47, 128, 237, .28);
+      }
+
       .wr-topic-new-group-icon {
-        width: 19px;
-        height: 19px;
+        width: 14px;
+        height: 14px;
       }
 
       .wr-topic-group-list {
@@ -1601,12 +1604,18 @@
       }
 
       .wr-topic-group-book-title-action {
+        display: -webkit-box;
         max-width: 100%;
         padding-right: 48px;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        overflow: hidden;
         color: var(--wr-topic-text);
         font-size: 13px;
         font-weight: 650;
         line-height: 1.4;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }
 
       .wr-topic-group-book-title-action:hover {
@@ -1822,22 +1831,17 @@
         width: 26px;
         height: 26px;
         z-index: 999;
-        display: grid;
-        place-items: center;
         border-radius: 999px;
         border: 2px solid #fff;
-        padding: 0;
         background: var(--wr-topic-blue);
         color: #fff;
+        font-size: 15px;
+        line-height: 21px;
+        text-align: center;
         cursor: pointer;
         opacity: 0;
         box-shadow: 0 4px 12px rgba(0, 0, 0, .22);
         transition: opacity .16s ease, background .16s ease;
-      }
-
-      .wr-book-context-icon .wr-topic-icon {
-        width: 15px;
-        height: 15px;
       }
 
       .shelfBook:hover .wr-book-context-icon {
@@ -1847,6 +1851,9 @@
       .wr-book-context-icon.has-note {
         opacity: 1;
         background: var(--wr-topic-blue);
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 16px;
+        font-weight: 700;
         box-shadow:
           0 0 0 2px rgba(255, 255, 255, .95),
           0 6px 16px rgba(47, 128, 237, .4),
@@ -2176,7 +2183,7 @@
       }
 
       icon.dataset.bookId = book.id;
-      icon.innerHTML = iconSvg(hasContext ? "info" : "plus");
+      icon.textContent = hasContext ? "i" : "+";
       icon.title = hasContext ? "查看阅读信息" : "添加阅读信息";
       icon.setAttribute("aria-label", icon.title);
       icon.classList.toggle("has-note", hasContext);
