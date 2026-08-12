@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.9
+// @version      0.3.11
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -646,6 +646,8 @@
     const icons = {
       cloud:
         '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>',
+      edit:
+        '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
       info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
       library:
         '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
@@ -773,6 +775,20 @@
 
       .wr-topic-panel * {
         box-sizing: border-box;
+      }
+
+      .wr-topic-panel button:not(:disabled),
+      .wr-topic-modal button:not(:disabled),
+      .wr-topic-entry,
+      .wr-book-context-icon,
+      .wr-topic-shelf-group,
+      a.shelfBook[href] {
+        cursor: pointer !important;
+      }
+
+      .wr-topic-panel button:disabled,
+      .wr-topic-modal button:disabled {
+        cursor: not-allowed !important;
       }
 
       .wr-topic-icon {
@@ -946,7 +962,7 @@
 
       .wr-topic-close-btn {
         position: absolute;
-        top: 16px;
+        top: 22px;
         right: 16px;
         width: 32px;
         height: 32px;
@@ -1522,6 +1538,26 @@
         white-space: pre-wrap;
       }
 
+      .wr-topic-detail-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .wr-topic-detail-icon-btn {
+        width: 30px;
+        height: 30px;
+        min-height: 30px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+      }
+
+      .wr-topic-detail-icon-btn .wr-topic-icon {
+        width: 15px;
+        height: 15px;
+      }
+
       .wr-topic-book-row {
         display: flex;
         flex-direction: column;
@@ -1883,6 +1919,10 @@
 
         .wr-topic-panel-header {
           padding: 18px 26px 12px;
+        }
+
+        .wr-topic-close-btn {
+          top: 18px;
         }
 
         .wr-topic-header-main {
@@ -2317,9 +2357,9 @@
     return `
       <div class="wr-topic-detail-head">
         <h3>${escapeHtml(group.name)}</h3>
-        <div>
-          <button class="wr-topic-btn" type="button" data-wr-action="edit-group" data-group-id="${escapeHtml(group.id)}">${text.edit}</button>
-          <button class="wr-topic-btn danger" type="button" data-wr-action="delete-group" data-group-id="${escapeHtml(group.id)}">${text.deleteGroup}</button>
+        <div class="wr-topic-detail-actions">
+          <button class="wr-topic-btn wr-topic-detail-icon-btn" type="button" data-wr-action="edit-group" data-group-id="${escapeHtml(group.id)}" title="${text.edit}" aria-label="${text.edit}">${iconSvg("edit")}</button>
+          <button class="wr-topic-btn danger wr-topic-detail-icon-btn" type="button" data-wr-action="delete-group" data-group-id="${escapeHtml(group.id)}" title="${text.deleteGroup}" aria-label="${text.deleteGroup}">${iconSvg("trash")}</button>
         </div>
       </div>
       <div class="wr-topic-detail-desc">${escapeHtml(group.description || "暂无描述")}</div>
