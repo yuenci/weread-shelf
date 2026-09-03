@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.3.11
+// @version      0.4.0
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
 // @updateURL    https://github.com/yuenci/weread-shelf/raw/refs/heads/master/weread-local-topic-shelf.user.js
 // @downloadURL  https://github.com/yuenci/weread-shelf/raw/refs/heads/master/weread-local-topic-shelf.user.js
+// @require      https://cdn.jsdelivr.net/npm/cytoscape@3.34.2/dist/cytoscape.min.js
 // @grant        GM_xmlhttpRequest
 // @connect      workers.dev
 // ==/UserScript==
@@ -17,6 +18,7 @@
   const STORE = {
     groups: "weread_local_topic_shelf_groups_v1",
     notes: "weread_local_book_context_notes_v1",
+    relations: "weread_local_reading_relations_v1",
     cloudConfig: "weread_cloud_sync_config_v1",
     syncMeta: "weread_cloud_sync_meta_v1",
     obsidianCache: "weread_obsidian_catalog_cache_v1",
@@ -38,6 +40,7 @@
     books: [],
     groups: [],
     notes: {},
+    relations: [],
     db: null,
     selectedGroupId: "",
     formMode: "",
@@ -75,6 +78,10 @@
       cached: false,
       error: "",
     },
+    noteNavigationStack: [],
+    noteDrafts: {},
+    graph: null,
+    graphContext: null,
   };
 
   const text = {
@@ -105,6 +112,11 @@
     whyRead: "我为什么读这本书？它在我的思想地图里承担什么角色？",
     status: "阅读状态 / 动机",
     question: "阅读问题",
+    lineage: "阅读脉络",
+    nextStop: "下一站",
+    addDiscovery: "添加发现",
+    viewGraph: "查看关系图",
+    libraryGraph: "全库关系",
     deleteNote: "删除描述",
     saved: "已保存",
     emptyName: "请填写主题名称。",
@@ -145,6 +157,7 @@
       tombstones: {
         groups: {},
         notes: {},
+        relations: {},
       },
     };
   }
@@ -207,6 +220,7 @@
 
     let groups = await dbGet(STORE.groups, null);
     let notes = await dbGet(STORE.notes, null);
+    let relations = await dbGet(STORE.relations, null);
     const cloudConfig = await dbGet(STORE.cloudConfig, null);
     const syncMeta = await dbGet(STORE.syncMeta, null);
     const obsidianCache = await dbGet(STORE.obsidianCache, null);
@@ -223,8 +237,14 @@
       localStorage.removeItem(STORE.notes);
     }
 
+    if (relations === null) {
+      relations = [];
+      await dbSet(STORE.relations, relations);
+    }
+
     state.groups = Array.isArray(groups) ? groups : [];
     state.notes = notes && typeof notes === "object" ? notes : {};
+    state.relations = Array.isArray(relations) ? relations : [];
     state.cloudConfig = {
       ...state.cloudConfig,
       ...(cloudConfig && typeof cloudConfig === "object" ? cloudConfig : {}),
@@ -246,6 +266,13 @@
           syncMeta.tombstones.notes &&
           typeof syncMeta.tombstones.notes === "object"
             ? syncMeta.tombstones.notes
+            : {},
+        relations:
+          syncMeta &&
+          syncMeta.tombstones &&
+          syncMeta.tombstones.relations &&
+          typeof syncMeta.tombstones.relations === "object"
+            ? syncMeta.tombstones.relations
             : {},
       },
     };
@@ -313,6 +340,12 @@
     await markLocalChange();
   }
 
+  async function saveRelations(relations) {
+    state.relations = relations;
+    await dbSet(STORE.relations, relations);
+    await markLocalChange();
+  }
+
   function isCloudConfigured(config = state.cloudConfig) {
     return Boolean(
       config &&
@@ -367,7 +400,7 @@
   function markDeleted(type, id, deletedAt = nowIso()) {
     if (!state.syncMeta) state.syncMeta = defaultSyncMeta();
     if (!state.syncMeta.tombstones) {
-      state.syncMeta.tombstones = { groups: {}, notes: {} };
+      state.syncMeta.tombstones = { groups: {}, notes: {}, relations: {} };
     }
     if (!state.syncMeta.tombstones[type]) {
       state.syncMeta.tombstones[type] = {};
@@ -384,6 +417,10 @@
       notes:
         value && value.notes && typeof value.notes === "object"
           ? value.notes
+          : {},
+      relations:
+        value && value.relations && typeof value.relations === "object"
+          ? value.relations
           : {},
     };
   }
@@ -463,21 +500,33 @@
     const nextGroups = Array.isArray(payload.groups) ? payload.groups : [];
     const nextNotes =
       payload.notes && typeof payload.notes === "object" ? payload.notes : {};
+    const nextRelations = Array.isArray(payload.relations)
+      ? payload.relations
+      : state.relations;
     const nextTombstones = normalizeTombstones(payload.tombstones);
+    if (
+      !Array.isArray(payload.relations) &&
+      (!payload.tombstones || !payload.tombstones.relations)
+    ) {
+      nextTombstones.relations = state.syncMeta.tombstones.relations || {};
+    }
     const changed =
       JSON.stringify(state.groups) !== JSON.stringify(nextGroups) ||
       JSON.stringify(state.notes) !== JSON.stringify(nextNotes) ||
+      JSON.stringify(state.relations) !== JSON.stringify(nextRelations) ||
       JSON.stringify(state.syncMeta.tombstones) !==
         JSON.stringify(nextTombstones);
 
     state.groups = nextGroups;
     state.notes = nextNotes;
+    state.relations = nextRelations;
     state.syncMeta.tombstones = nextTombstones;
     if (!changed) return;
 
     await Promise.all([
       dbSet(STORE.groups, nextGroups),
       dbSet(STORE.notes, nextNotes),
+      dbSet(STORE.relations, nextRelations),
     ]);
     if (!state.formMode && !document.getElementById("wr-topic-note-modal")) {
       refreshShelf();
@@ -573,6 +622,7 @@
       deviceId: state.syncMeta.deviceId,
       groups: state.groups,
       notes: state.notes,
+      relations: state.relations,
       tombstones: state.syncMeta.tombstones,
     });
     await applyWereadSyncResponse(result.body);
@@ -648,9 +698,16 @@
         '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>',
       edit:
         '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+      arrowLeft: '<path d="m15 18-6-6 6-6"/>',
+      external:
+        '<path d="M15 3h6v6"/><path d="m10 14 11-11"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+      fit:
+        '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
       info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
       library:
         '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
+      network:
+        '<circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="m12 7-6 10"/><path d="m12 7 6 10"/><path d="M7 19h10"/>',
       plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
       refresh:
         '<path d="M21 12a9 9 0 0 0-15.17-6.55L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.17 6.55L21 16"/><path d="M16 16h5v5"/>',
@@ -1907,7 +1964,398 @@
           0 2px 6px rgba(0, 0, 0, .22);
       }
 
+      .wr-topic-nested-modal {
+        z-index: 2147483605;
+      }
+
+      .wr-topic-note-card {
+        height: min(780px, calc(100vh - 44px));
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .wr-topic-note-heading,
+      .wr-topic-note-actions > div,
+      .wr-topic-btn:has(.wr-topic-icon) {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .wr-topic-icon-btn {
+        width: 32px;
+        height: 32px;
+        min-width: 32px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 6px;
+        padding: 0;
+        background: #fff;
+        color: #526070;
+      }
+
+      .wr-topic-icon-btn:hover,
+      .wr-topic-icon-btn:focus-visible {
+        border-color: #b9c4d2;
+        color: var(--wr-topic-blue);
+        outline: none;
+      }
+
+      .wr-topic-modal-book-cover,
+      .wr-topic-modal-book .wr-topic-modal-book-cover {
+        flex: 0 0 52px;
+        width: 52px;
+        height: 76px;
+      }
+
+      .wr-topic-cover-placeholder {
+        display: grid;
+        place-items: center;
+        border-radius: 4px;
+        background: #edf1f7;
+        color: #68778b;
+        font-weight: 700;
+      }
+
+      .wr-topic-note-scroll {
+        min-height: 0;
+        flex: 1 1 auto;
+        display: grid;
+        align-content: start;
+        gap: 15px;
+        overflow-x: hidden;
+        overflow-y: auto;
+        padding: 2px 6px 14px 0;
+        scrollbar-width: thin;
+      }
+
+      .wr-topic-relation-section h4 {
+        margin: 0 0 9px;
+        color: #344054;
+        font-size: 13px;
+      }
+
+      .wr-topic-relation-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+        gap: 9px;
+      }
+
+      .wr-topic-relation-card {
+        position: relative;
+        min-width: 0;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: #fff;
+      }
+
+      .wr-topic-relation-card:hover,
+      .wr-topic-relation-card:focus-within {
+        border-color: rgba(47, 128, 237, .42);
+      }
+
+      .wr-topic-relation-main {
+        width: 100%;
+        min-width: 0;
+        min-height: 92px;
+        display: grid;
+        grid-template-columns: 48px minmax(0, 1fr);
+        align-items: start;
+        gap: 10px;
+        border: 0;
+        padding: 10px;
+        background: transparent;
+        text-align: left;
+      }
+
+      .wr-topic-relation-cover {
+        width: 48px;
+        height: 70px;
+        object-fit: cover;
+        border-radius: 3px;
+        box-shadow: 0 2px 7px rgba(15, 23, 42, .12);
+      }
+
+      .wr-topic-relation-content {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+      }
+
+      .wr-topic-relation-content strong {
+        padding-right: 58px;
+        overflow: hidden;
+        color: var(--wr-topic-text);
+        font-size: 12px;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+      }
+
+      .wr-topic-relation-type {
+        width: fit-content;
+        border-radius: 4px;
+        padding: 2px 5px;
+        background: #eaf2ff;
+        color: #2269bd;
+        font-size: 10px;
+      }
+
+      .wr-topic-relation-type.author-citation {
+        background: #fff2dd;
+        color: #a45c00;
+      }
+
+      .wr-topic-relation-type.question-driven {
+        background: #e8f6ee;
+        color: #237a4b;
+      }
+
+      .wr-topic-relation-reason {
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        overflow: hidden;
+        color: var(--wr-topic-muted);
+        font-size: 10px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .wr-topic-relation-actions {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        display: flex;
+        gap: 3px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .wr-topic-relation-card:hover .wr-topic-relation-actions,
+      .wr-topic-relation-card:focus-within .wr-topic-relation-actions {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .wr-topic-relation-actions button {
+        width: 25px;
+        height: 25px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 5px;
+        padding: 0;
+        background: rgba(255, 255, 255, .96);
+        color: #526070;
+      }
+
+      .wr-topic-relation-actions button.danger {
+        color: #d92d20;
+      }
+
+      .wr-topic-relation-actions .wr-topic-icon {
+        width: 13px;
+        height: 13px;
+      }
+
+      .wr-topic-note-actions {
+        justify-content: space-between;
+        flex-wrap: wrap;
+      }
+
+      .wr-topic-note-actions > div:last-child {
+        margin-left: auto;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .wr-topic-relation-editor {
+        width: min(600px, calc(100vw - 44px));
+      }
+
+      .wr-topic-relation-form {
+        display: grid;
+        gap: 14px;
+        margin-top: 14px;
+      }
+
+      .wr-topic-relation-current {
+        margin: 12px 0 0 !important;
+        font-size: 12px;
+      }
+
+      .wr-topic-segmented,
+      .wr-topic-relation-types {
+        min-width: 0;
+        display: flex;
+        gap: 7px;
+        border: 0;
+        padding: 0;
+        margin: 0;
+      }
+
+      .wr-topic-segmented legend,
+      .wr-topic-relation-types legend {
+        width: 100%;
+        margin-bottom: 7px;
+        color: #344054;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .wr-topic-segmented label,
+      .wr-topic-relation-types label {
+        position: relative;
+        min-width: 0;
+      }
+
+      .wr-topic-segmented input,
+      .wr-topic-relation-types input {
+        position: absolute;
+        opacity: 0;
+      }
+
+      .wr-topic-segmented span,
+      .wr-topic-relation-types span {
+        min-height: 34px;
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 6px;
+        padding: 0 11px;
+        background: #fff;
+        color: #526070;
+        font-size: 12px;
+      }
+
+      .wr-topic-segmented input:checked + span,
+      .wr-topic-relation-types input:checked + span {
+        border-color: var(--wr-topic-blue);
+        background: #eef5ff;
+        color: #1769c2;
+      }
+
+      .wr-topic-relation-reason-input {
+        min-height: 96px;
+      }
+
+      .wr-topic-graph-card {
+        box-sizing: border-box;
+        width: min(1060px, calc(100vw - 44px));
+        height: min(760px, calc(100vh - 44px));
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border-radius: 10px;
+        padding: 18px;
+        background: #fff;
+        box-shadow: 0 24px 80px rgba(15, 23, 42, .24);
+      }
+
+      .wr-topic-graph-card * {
+        box-sizing: border-box;
+      }
+
+      .wr-topic-graph-toolbar {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) 150px 34px 34px;
+        gap: 8px;
+        margin-top: 15px;
+      }
+
+      .wr-topic-graph-toolbar .wr-topic-input,
+      .wr-topic-graph-toolbar .wr-topic-icon-btn {
+        height: 34px;
+        min-height: 34px;
+        padding-top: 0;
+        padding-bottom: 0;
+      }
+
+      .wr-topic-graph-body {
+        min-height: 0;
+        flex: 1 1 auto;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 260px;
+        gap: 12px;
+        margin-top: 12px;
+      }
+
+      .wr-topic-graph-canvas {
+        min-width: 0;
+        min-height: 420px;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 8px;
+        background: #fafbfd;
+      }
+
+      .wr-topic-graph-inspector {
+        min-width: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        border-left: 1px solid var(--wr-topic-border);
+        padding: 10px 4px 10px 14px;
+        color: var(--wr-topic-muted);
+        font-size: 12px;
+      }
+
+      .wr-topic-graph-inspector p {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .wr-topic-graph-inspector-content {
+        min-width: 0;
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        color: var(--wr-topic-text);
+        overflow-wrap: anywhere;
+      }
+
+      .wr-topic-graph-outside {
+        display: block;
+        width: fit-content;
+        margin-top: 6px;
+        border-radius: 4px;
+        padding: 2px 5px;
+        background: #eef1f5;
+        color: #697586;
+        font-size: 10px;
+      }
+
+      .wr-topic-graph-inspector-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+        margin-top: 14px;
+      }
+
+      .wr-topic-graph-edge-title {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 10px;
+        color: var(--wr-topic-text);
+        overflow-wrap: anywhere;
+      }
+
+      .wr-topic-graph-error,
+      .wr-topic-graph-empty {
+        display: grid;
+        place-items: center;
+        min-height: 260px;
+        color: var(--wr-topic-muted);
+        text-align: center;
+      }
+
       @media (max-width: 760px) {
+        .wr-topic-nested-modal {
+          padding: 12px;
+        }
         .wr-topic-entry {
           right: 14px;
           bottom: 18px;
@@ -1981,10 +2429,49 @@
         .wr-topic-group-book-list {
           grid-template-columns: 1fr;
         }
+
+        .wr-topic-note-actions {
+          align-items: stretch;
+        }
+
+        .wr-topic-note-actions > div {
+          width: 100%;
+        }
+
+        .wr-topic-note-actions > div:last-child {
+          justify-content: flex-end;
+        }
+
+        .wr-topic-relation-list {
+          grid-template-columns: 1fr;
+        }
+
+        .wr-topic-graph-card {
+          width: calc(100vw - 24px);
+          height: calc(100vh - 24px);
+          padding: 14px;
+        }
+
+        .wr-topic-graph-toolbar {
+          grid-template-columns: minmax(0, 1fr) 126px 34px 34px;
+        }
+
+        .wr-topic-graph-body {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(360px, 1fr) auto;
+        }
+
+        .wr-topic-graph-inspector {
+          max-height: 170px;
+          border-top: 1px solid var(--wr-topic-border);
+          border-left: 0;
+          padding: 10px 4px;
+        }
       }
 
       @media (hover: none) {
-        .wr-topic-group-book-remove {
+        .wr-topic-group-book-remove,
+        .wr-topic-relation-actions {
           opacity: 1;
           pointer-events: auto;
           transform: none;
@@ -2100,7 +2587,7 @@
       title,
       author: authorEl ? authorEl.textContent.trim() : "",
       url,
-      cover: img ? img.src : "",
+      cover: img && img.getAttribute("src") ? img.src : "",
     };
   }
 
@@ -2130,6 +2617,200 @@
 
     const note = getNotes()[bookId];
     return note ? note.book : null;
+  }
+
+  function normalizeTitle(value) {
+    return String(value || "")
+      .normalize("NFKC")
+      .trim()
+      .replace(/\s+/g, " ")
+      .toLocaleLowerCase("en-US");
+  }
+
+  async function sha256Hex(value) {
+    if (window.crypto && window.crypto.subtle) {
+      const digest = await window.crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(String(value)),
+      );
+      return Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
+    }
+    return sha256Fallback(String(value));
+  }
+
+  function sha256Fallback(value) {
+    const bytes = new TextEncoder().encode(value);
+    const bitLength = bytes.length * 8;
+    const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+    const data = new Uint8Array(paddedLength);
+    data.set(bytes);
+    data[bytes.length] = 0x80;
+    const view = new DataView(data.buffer);
+    view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+    view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
+    const h = [
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    const k = [
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    const rotateRight = (number, shift) => (number >>> shift) | (number << (32 - shift));
+    const words = new Uint32Array(64);
+    for (let offset = 0; offset < paddedLength; offset += 64) {
+      for (let index = 0; index < 16; index += 1) {
+        words[index] = view.getUint32(offset + index * 4, false);
+      }
+      for (let index = 16; index < 64; index += 1) {
+        const s0 = rotateRight(words[index - 15], 7) ^ rotateRight(words[index - 15], 18) ^ (words[index - 15] >>> 3);
+        const s1 = rotateRight(words[index - 2], 17) ^ rotateRight(words[index - 2], 19) ^ (words[index - 2] >>> 10);
+        words[index] = (words[index - 16] + s0 + words[index - 7] + s1) >>> 0;
+      }
+      let [a, b, c, d, e, f, g, currentH] = h;
+      for (let index = 0; index < 64; index += 1) {
+        const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+        const choice = (e & f) ^ (~e & g);
+        const temp1 = (currentH + sum1 + choice + k[index] + words[index]) >>> 0;
+        const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+        const majority = (a & b) ^ (a & c) ^ (b & c);
+        const temp2 = (sum0 + majority) >>> 0;
+        currentH = g;
+        g = f;
+        f = e;
+        e = (d + temp1) >>> 0;
+        d = c;
+        c = b;
+        b = a;
+        a = (temp1 + temp2) >>> 0;
+      }
+      [a, b, c, d, e, f, g, currentH].forEach((value, index) => {
+        h[index] = (h[index] + value) >>> 0;
+      });
+    }
+    return h.map((word) => word.toString(16).padStart(8, "0")).join("");
+  }
+
+  async function nodeIdForTitle(title) {
+    return `book_${await sha256Hex(normalizeTitle(title))}`;
+  }
+
+  async function relationIdForNodes(fromNodeId, toNodeId) {
+    return `rel_${await sha256Hex(`${fromNodeId}\u0000${toNodeId}`)}`;
+  }
+
+  function allKnownBooks() {
+    const candidates = [];
+    const add = (book) => {
+      if (!book || !String(book.title || "").trim()) return;
+      candidates.push({
+        id: String(book.id || book.bookId || ""),
+        title: String(book.title || "").trim(),
+        author: String(book.author || ""),
+        url: String(book.url || book.detailUrl || ""),
+        cover: String(book.cover || book.coverUrl || ""),
+      });
+    };
+    state.books.forEach(add);
+    getGroups().forEach((group) => (group.books || []).forEach(add));
+    Object.values(getNotes()).forEach((note) => add(note && note.book));
+    (state.obsidianCache.books || []).forEach((item) =>
+      add({ title: item.matchTitle || item.sourceTitle }),
+    );
+    state.relations.forEach((relation) => {
+      add(relation.from);
+      add(relation.to);
+    });
+
+    const byTitle = new Map();
+    candidates.forEach((book) => {
+      const normalized = normalizeTitle(book.title);
+      if (!normalized) return;
+      const existing = byTitle.get(normalized);
+      if (!existing || (!existing.id && book.id)) byTitle.set(normalized, book);
+    });
+    return [...byTitle.values()].sort((left, right) =>
+      left.title.localeCompare(right.title, "zh-CN"),
+    );
+  }
+
+  function findBookByNormalizedTitle(normalizedTitle) {
+    const candidates = [...state.books];
+    getGroups().forEach((group) => candidates.push(...(group.books || [])));
+    Object.values(getNotes()).forEach((note) => {
+      if (note && note.book) candidates.push(note.book);
+    });
+    return candidates.find(
+      (book) => normalizeTitle(book.title) === normalizedTitle && book.id,
+    );
+  }
+
+  function relationRefBook(ref) {
+    return (
+      (ref.bookId && findBook(ref.bookId)) ||
+      findBookByNormalizedTitle(ref.normalizedTitle) || {
+        id: ref.bookId || "",
+        title: ref.title,
+        author: "",
+        url: ref.detailUrl || "",
+        cover: ref.coverUrl || "",
+      }
+    );
+  }
+
+  async function createRelationRef(book) {
+    const title = String(book.title || "").trim();
+    const normalizedTitle = normalizeTitle(title);
+    return {
+      nodeId: await nodeIdForTitle(title),
+      bookId: String(book.id || book.bookId || ""),
+      title,
+      normalizedTitle,
+      detailUrl: String(book.url || book.detailUrl || ""),
+      coverUrl: String(book.cover || book.coverUrl || ""),
+    };
+  }
+
+  function relationsForBook(book) {
+    const normalized = normalizeTitle(book && book.title);
+    return {
+      incoming: state.relations.filter(
+        (relation) => relation.to.normalizedTitle === normalized,
+      ),
+      outgoing: state.relations.filter(
+        (relation) => relation.from.normalizedTitle === normalized,
+      ),
+    };
+  }
+
+  function relationTypeLabel(type) {
+    return {
+      "extended-reading": "延伸阅读",
+      "author-citation": "作者引用",
+      "question-driven": "问题驱动",
+    }[type] || "阅读发现";
+  }
+
+  function validateOptionalHttpsUrl(value, label) {
+    const input = String(value || "").trim();
+    if (!input) return "";
+    if (input.length > 2048) throw new Error(`${label}不能超过 2048 个字符。`);
+    let url;
+    try {
+      url = new URL(input);
+    } catch {
+      throw new Error(`${label}不是有效网址。`);
+    }
+    if (url.protocol !== "https:") throw new Error(`${label}必须使用 HTTPS。`);
+    return url.href;
   }
 
   function createPlaceholderCover(title) {
@@ -2358,6 +3039,7 @@
       <div class="wr-topic-detail-head">
         <h3>${escapeHtml(group.name)}</h3>
         <div class="wr-topic-detail-actions">
+          <button class="wr-topic-btn wr-topic-detail-icon-btn" type="button" data-wr-action="open-graph" data-scope="group" data-group-id="${escapeHtml(group.id)}" title="查看主题组关系" aria-label="查看主题组关系">${iconSvg("network")}</button>
           <button class="wr-topic-btn wr-topic-detail-icon-btn" type="button" data-wr-action="edit-group" data-group-id="${escapeHtml(group.id)}" title="${text.edit}" aria-label="${text.edit}">${iconSvg("edit")}</button>
           <button class="wr-topic-btn danger wr-topic-detail-icon-btn" type="button" data-wr-action="delete-group" data-group-id="${escapeHtml(group.id)}" title="${text.deleteGroup}" aria-label="${text.deleteGroup}">${iconSvg("trash")}</button>
         </div>
@@ -2670,6 +3352,7 @@
               <div class="wr-topic-shelf-tools" role="group" aria-label="书架工具">
                 <button class="wr-topic-header-tool" type="button" data-wr-action="refresh-shelf">${iconSvg("refresh", "wr-topic-icon wr-topic-header-tool-icon")}<span>刷新书架</span></button>
                 <button class="wr-topic-header-tool" type="button" data-wr-action="load-full-shelf">${iconSvg("library", "wr-topic-icon wr-topic-header-tool-icon")}<span>完整书架</span></button>
+                <button class="wr-topic-header-tool" type="button" data-wr-action="open-graph" data-scope="all">${iconSvg("network", "wr-topic-icon wr-topic-header-tool-icon")}<span>${text.libraryGraph}</span></button>
               </div>
               <div class="wr-topic-header-actions">
                 <div class="wr-topic-sync-group" role="group" aria-label="云同步工具">
@@ -2845,62 +3528,707 @@
     refreshShelf();
   }
 
-  function openBookNote(bookId) {
-    const book = findBook(bookId);
-    if (!book) return;
+  function coverMarkup(book, className) {
+    if (book.cover) {
+      return `<img class="${className}" src="${escapeHtml(book.cover)}" alt="">`;
+    }
+    return `<span class="${className} wr-topic-cover-placeholder" aria-hidden="true">${escapeHtml(String(book.title || "书").slice(0, 1))}</span>`;
+  }
 
+  function relationCardsHtml(relations, direction) {
+    return relations
+      .map((relation) => {
+        const ref = direction === "incoming" ? relation.from : relation.to;
+        const book = relationRefBook(ref);
+        const action = book.id
+          ? "open-related-book"
+          : ref.detailUrl
+            ? "open-external"
+            : "edit-relation";
+        return `
+          <article class="wr-topic-relation-card" data-relation-id="${escapeHtml(relation.id)}">
+            <button class="wr-topic-relation-main" type="button" data-wr-action="${action}" data-book-id="${escapeHtml(book.id || "")}" data-url="${escapeHtml(ref.detailUrl || "")}" data-relation-id="${escapeHtml(relation.id)}">
+              ${coverMarkup(book, "wr-topic-relation-cover")}
+              <span class="wr-topic-relation-content">
+                <strong title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</strong>
+                <span class="wr-topic-relation-type ${escapeHtml(relation.type)}">${relationTypeLabel(relation.type)}</span>
+                <span class="wr-topic-relation-reason">${escapeHtml(relation.reason)}</span>
+              </span>
+            </button>
+            <span class="wr-topic-relation-actions">
+              ${!book.id && ref.detailUrl ? `<button type="button" data-wr-action="open-external" data-url="${escapeHtml(ref.detailUrl)}" title="打开书籍详情" aria-label="打开书籍详情">${iconSvg("external")}</button>` : ""}
+              <button type="button" data-wr-action="edit-relation" data-relation-id="${escapeHtml(relation.id)}" title="编辑发现" aria-label="编辑发现">${iconSvg("edit")}</button>
+              <button class="danger" type="button" data-wr-action="delete-relation" data-relation-id="${escapeHtml(relation.id)}" title="删除发现" aria-label="删除发现">${iconSvg("trash")}</button>
+            </span>
+          </article>`;
+      })
+      .join("");
+  }
+
+  function relationSectionHtml(book, direction) {
+    const relations = relationsForBook(book)[direction];
+    const title = direction === "incoming" ? text.lineage : text.nextStop;
+    return `
+      <section class="wr-topic-relation-section" data-wr-relation-section="${direction}" ${relations.length ? "" : "hidden"}>
+        <h4>${title}</h4>
+        <div class="wr-topic-relation-list" data-wr-relation-list="${direction}">${relationCardsHtml(relations, direction)}</div>
+      </section>`;
+  }
+
+  function snapshotNoteDraft() {
+    const form = document.querySelector('#wr-topic-note-modal [data-wr-form="note"]');
+    if (!form) return;
+    state.noteDrafts[form.dataset.bookId] = {
+      note: form.elements.note.value,
+      status: form.elements.status.value,
+      question: form.elements.question.value,
+    };
+  }
+
+  function renderBookNoteContent(bookId) {
+    const book = findBook(bookId);
+    if (!book) return "";
     const notes = getNotes();
     const note = notes[bookId] || { note: "", status: "", question: "" };
+    const draft = state.noteDrafts[bookId] || {};
     const obsidian = getObsidianContext(bookId);
     const obsidianAuthoritative = hasObsidianReadingContext(obsidian);
-    const contextValue = obsidianAuthoritative ? obsidian.context : note.note;
+    const contextValue = obsidianAuthoritative
+      ? obsidian.context
+      : Object.prototype.hasOwnProperty.call(draft, "note")
+        ? draft.note
+        : note.note;
     const questionValue = obsidianAuthoritative
       ? obsidian.question
-      : note.question;
+      : Object.prototype.hasOwnProperty.call(draft, "question")
+        ? draft.question
+        : note.question;
+    const statusValue = Object.prototype.hasOwnProperty.call(draft, "status")
+      ? draft.status
+      : note.status;
 
-    const modal = document.createElement("div");
-    modal.className = "wr-topic-modal";
-    modal.id = "wr-topic-note-modal";
-    modal.innerHTML = `
-      <div class="wr-topic-modal-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(text.bookNoteTitle)}">
+    return `
+      <div class="wr-topic-modal-card wr-topic-note-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(text.bookNoteTitle)}">
         <div class="wr-topic-modal-head">
-          <h3>${text.bookNoteTitle}</h3>
+          <div class="wr-topic-note-heading">
+            ${state.noteNavigationStack.length ? `<button class="wr-topic-icon-btn" type="button" data-wr-action="back-book-note" title="返回上一本书" aria-label="返回上一本书">${iconSvg("arrowLeft")}</button>` : ""}
+            <h3>${text.bookNoteTitle}</h3>
+          </div>
           <button class="wr-topic-btn" type="button" data-wr-action="close-note-modal">${text.close}</button>
         </div>
         <div class="wr-topic-modal-book">
-          <img src="${escapeHtml(book.cover)}" alt="">
+          ${coverMarkup(book, "wr-topic-modal-book-cover")}
           <div>
             <span class="wr-topic-book-title">${escapeHtml(book.title)}</span>
             <span class="wr-topic-book-author">${escapeHtml(book.author)}</span>
           </div>
         </div>
         <form class="wr-topic-form" data-wr-form="note" data-book-id="${escapeHtml(bookId)}" data-obsidian-authoritative="${obsidianAuthoritative ? "1" : "0"}">
-          ${obsidianAuthoritative ? `<p class="wr-topic-source-note">阅读上下文和阅读问题来自 Obsidian，只读展示。原有本地内容仍被保留。</p>` : ""}
-          <div class="wr-topic-field">
-            <label for="wr-note-main">${text.whyRead}</label>
-            <textarea id="wr-note-main" class="wr-topic-textarea" name="note" ${obsidianAuthoritative ? "readonly" : ""}>${escapeHtml(contextValue || "")}</textarea>
+          <div class="wr-topic-note-scroll">
+            ${relationSectionHtml(book, "incoming")}
+            ${obsidianAuthoritative ? `<p class="wr-topic-source-note">阅读上下文和阅读问题来自 Obsidian，只读展示。原有本地内容仍被保留。</p>` : ""}
+            <div class="wr-topic-field">
+              <label for="wr-note-main">${text.whyRead}</label>
+              <textarea id="wr-note-main" class="wr-topic-textarea" name="note" ${obsidianAuthoritative ? "readonly" : ""}>${escapeHtml(contextValue || "")}</textarea>
+            </div>
+            <div class="wr-topic-field">
+              <label for="wr-note-status">${text.status}</label>
+              <input id="wr-note-status" class="wr-topic-input" name="status" value="${escapeHtml(statusValue || "")}">
+            </div>
+            <div class="wr-topic-field">
+              <label for="wr-note-question">${text.question}</label>
+              <textarea id="wr-note-question" class="wr-topic-textarea" name="question" ${obsidianAuthoritative ? "readonly" : ""}>${escapeHtml(questionValue || "")}</textarea>
+            </div>
+            ${relationSectionHtml(book, "outgoing")}
           </div>
-          <div class="wr-topic-field">
-            <label for="wr-note-status">${text.status}</label>
-            <input id="wr-note-status" class="wr-topic-input" name="status" value="${escapeHtml(note.status || "")}">
-          </div>
-          <div class="wr-topic-field">
-            <label for="wr-note-question">${text.question}</label>
-            <textarea id="wr-note-question" class="wr-topic-textarea" name="question" ${obsidianAuthoritative ? "readonly" : ""}>${escapeHtml(questionValue || "")}</textarea>
-          </div>
-          <div class="wr-topic-modal-actions">
-            <button class="wr-topic-btn danger" type="button" data-wr-action="delete-book-note" data-book-id="${escapeHtml(bookId)}">${obsidianAuthoritative ? "清除本地状态" : text.deleteNote}</button>
-            <button class="wr-topic-btn primary" type="submit">${text.save}</button>
+          <div class="wr-topic-modal-actions wr-topic-note-actions">
+            <div>
+              <button class="wr-topic-btn danger" type="button" data-wr-action="delete-book-note" data-book-id="${escapeHtml(bookId)}">${obsidianAuthoritative ? "清除本地状态" : text.deleteNote}</button>
+            </div>
+            <div>
+              <button class="wr-topic-btn" type="button" data-wr-action="add-relation" data-book-id="${escapeHtml(bookId)}">${iconSvg("plus")}<span>${text.addDiscovery}</span></button>
+              <button class="wr-topic-btn" type="button" data-wr-action="open-graph" data-scope="book" data-book-id="${escapeHtml(bookId)}">${iconSvg("network")}<span>${text.viewGraph}</span></button>
+              <button class="wr-topic-btn primary" type="submit">${text.save}</button>
+            </div>
           </div>
         </form>
-      </div>
-    `;
-    safeAppend(getMountRoot(), modal, "note modal");
+      </div>`;
+  }
+
+  function openBookNote(bookId, { preserveHistory = false } = {}) {
+    if (!findBook(bookId)) return;
+    let modal = document.getElementById("wr-topic-note-modal");
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.className = "wr-topic-modal";
+      modal.id = "wr-topic-note-modal";
+      if (!preserveHistory) state.noteNavigationStack = [];
+      if (!safeAppend(getMountRoot(), modal, "note modal")) return;
+    }
+    modal.innerHTML = renderBookNoteContent(bookId);
+  }
+
+  function refreshNoteRelationSections(bookId) {
+    const form = document.querySelector('#wr-topic-note-modal [data-wr-form="note"]');
+    const book = findBook(bookId);
+    if (!form || !book || form.dataset.bookId !== bookId) return;
+    for (const direction of ["incoming", "outgoing"]) {
+      const section = document.querySelector(
+        `#wr-topic-note-modal [data-wr-relation-section="${direction}"]`,
+      );
+      if (!section) continue;
+      const relations = relationsForBook(book)[direction];
+      section.hidden = !relations.length;
+      const list = section.querySelector(`[data-wr-relation-list="${direction}"]`);
+      if (list) list.innerHTML = relationCardsHtml(relations, direction);
+    }
   }
 
   function closeNoteModal() {
     const modal = document.getElementById("wr-topic-note-modal");
     if (modal) modal.remove();
+    state.noteNavigationStack = [];
+    state.noteDrafts = {};
+  }
+
+  function relationEditorOptions() {
+    return allKnownBooks()
+      .map((book) => `<option value="${escapeHtml(book.title)}"></option>`)
+      .join("");
+  }
+
+  function relationEndpointByNodeId(nodeId) {
+    for (const relation of state.relations) {
+      if (relation.from.nodeId === nodeId) return relation.from;
+      if (relation.to.nodeId === nodeId) return relation.to;
+    }
+    return null;
+  }
+
+  function openRelationModal({ bookId = "", nodeId = "", relationId = "", direction = "outgoing" } = {}) {
+    const editing = state.relations.find((relation) => relation.id === relationId) || null;
+    const currentBook = bookId ? findBook(bookId) : null;
+    const currentNormalizedTitle = normalizeTitle(currentBook && currentBook.title);
+    const editingCurrentRef = editing
+      ? editing.from.normalizedTitle === currentNormalizedTitle
+        ? editing.from
+        : editing.to.normalizedTitle === currentNormalizedTitle
+          ? editing.to
+          : null
+      : null;
+    const currentRef = currentBook
+      ? {
+          nodeId: (editingCurrentRef && editingCurrentRef.nodeId) || nodeId,
+          bookId: currentBook.id,
+          title: currentBook.title,
+          normalizedTitle: normalizeTitle(currentBook.title),
+          detailUrl: currentBook.url || "",
+          coverUrl: currentBook.cover || "",
+        }
+      : relationEndpointByNodeId(nodeId) || (editing ? editing.from : null);
+    if (!currentRef) return;
+
+    let actualDirection = direction;
+    if (editing && currentRef.nodeId === editing.to.nodeId) actualDirection = "incoming";
+    const otherRef = editing
+      ? actualDirection === "incoming"
+        ? editing.from
+        : editing.to
+      : null;
+    closeRelationModal();
+    const modal = document.createElement("div");
+    modal.className = "wr-topic-modal wr-topic-nested-modal";
+    modal.id = "wr-topic-relation-modal";
+    modal.innerHTML = `
+      <div class="wr-topic-modal-card wr-topic-relation-editor" role="dialog" aria-modal="true" aria-label="${editing ? "编辑发现" : text.addDiscovery}">
+        <div class="wr-topic-modal-head">
+          <h3>${editing ? "编辑发现" : text.addDiscovery}</h3>
+          <button class="wr-topic-icon-btn" type="button" data-wr-action="close-relation-modal" title="关闭" aria-label="关闭">${iconSvg("x")}</button>
+        </div>
+        <p class="wr-topic-relation-current">当前书籍：<strong>${escapeHtml(currentRef.title)}</strong></p>
+        <form class="wr-topic-relation-form" data-wr-form="relation" data-current-book-id="${escapeHtml(currentRef.bookId || bookId)}" data-current-node-id="${escapeHtml(currentRef.nodeId || nodeId)}" data-current-title="${escapeHtml(currentRef.title)}" data-current-url="${escapeHtml(currentRef.detailUrl || "")}" data-current-cover="${escapeHtml(currentRef.coverUrl || "")}" data-original-relation-id="${escapeHtml(editing ? editing.id : "")}">
+          <fieldset class="wr-topic-segmented">
+            <legend>方向</legend>
+            <label><input type="radio" name="direction" value="outgoing" ${actualDirection === "outgoing" ? "checked" : ""}><span>这本书带我去</span></label>
+            <label><input type="radio" name="direction" value="incoming" ${actualDirection === "incoming" ? "checked" : ""}><span>我从这本书来</span></label>
+          </fieldset>
+          <div class="wr-topic-field">
+            <label for="wr-relation-title">书名</label>
+            <input id="wr-relation-title" class="wr-topic-input" name="title" maxlength="300" list="wr-relation-book-options" value="${escapeHtml(otherRef ? otherRef.title : "")}" required autocomplete="off" data-wr-action="relation-title">
+            <datalist id="wr-relation-book-options">${relationEditorOptions()}</datalist>
+          </div>
+          <div class="wr-topic-field">
+            <label for="wr-relation-reason">为什么想继续？</label>
+            <textarea id="wr-relation-reason" class="wr-topic-textarea wr-topic-relation-reason-input" name="reason" maxlength="4000" required>${escapeHtml(editing ? editing.reason : "")}</textarea>
+          </div>
+          <fieldset class="wr-topic-relation-types">
+            <legend>关系</legend>
+            ${[
+              ["extended-reading", "延伸阅读"],
+              ["author-citation", "作者引用"],
+              ["question-driven", "问题驱动"],
+            ].map(([value, label], index) => `<label><input type="radio" name="type" value="${value}" ${(editing ? editing.type === value : index === 0) ? "checked" : ""}><span>${label}</span></label>`).join("")}
+          </fieldset>
+          <div class="wr-topic-field">
+            <label for="wr-relation-url">书籍详情页 URL</label>
+            <input id="wr-relation-url" class="wr-topic-input" name="detailUrl" type="url" maxlength="2048" placeholder="https://..." value="${escapeHtml(otherRef ? otherRef.detailUrl : "")}">
+          </div>
+          <div class="wr-topic-field">
+            <label for="wr-relation-cover">书籍封面 URL</label>
+            <input id="wr-relation-cover" class="wr-topic-input" name="coverUrl" type="url" maxlength="2048" placeholder="https://..." value="${escapeHtml(otherRef ? otherRef.coverUrl : "")}">
+          </div>
+          <div class="wr-topic-modal-actions">
+            <button class="wr-topic-btn" type="button" data-wr-action="close-relation-modal">${text.cancel}</button>
+            <button class="wr-topic-btn primary" type="submit">${text.save}</button>
+          </div>
+        </form>
+      </div>`;
+    safeAppend(getMountRoot(), modal, "relation modal");
+  }
+
+  function closeRelationModal() {
+    const modal = document.getElementById("wr-topic-relation-modal");
+    if (modal) modal.remove();
+  }
+
+  function fillRelationCandidate(input) {
+    const match = allKnownBooks().find(
+      (book) => normalizeTitle(book.title) === normalizeTitle(input.value),
+    );
+    if (!match) return;
+    const form = input.form;
+    if (!form) return;
+    form.elements.title.value = match.title;
+    form.elements.detailUrl.value = match.url || "";
+    form.elements.coverUrl.value = match.cover || "";
+    activateExistingRelation(form);
+  }
+
+  function activateExistingRelation(form) {
+    const currentTitle = normalizeTitle(form.dataset.currentTitle);
+    const targetTitle = normalizeTitle(form.elements.title.value);
+    if (!currentTitle || !targetTitle) return;
+    const outgoing = form.elements.direction.value === "outgoing";
+    const duplicate = state.relations.find((relation) =>
+      outgoing
+        ? relation.from.normalizedTitle === currentTitle &&
+          relation.to.normalizedTitle === targetTitle
+        : relation.from.normalizedTitle === targetTitle &&
+          relation.to.normalizedTitle === currentTitle,
+    );
+    if (!duplicate) return;
+    form.dataset.originalRelationId = duplicate.id;
+    form.elements.reason.value = duplicate.reason;
+    form.elements.type.value = duplicate.type;
+    form.elements.detailUrl.value =
+      (outgoing ? duplicate.to : duplicate.from).detailUrl || "";
+    form.elements.coverUrl.value =
+      (outgoing ? duplicate.to : duplicate.from).coverUrl || "";
+    const heading = form.closest(".wr-topic-relation-editor")?.querySelector("h3");
+    if (heading) heading.textContent = "编辑发现";
+  }
+
+  async function saveRelationFromForm(form) {
+    const title = form.elements.title.value.trim();
+    const reason = form.elements.reason.value.trim();
+    if (!title || !reason || !form.elements.type.value) {
+      alert("请填写书名、为什么想继续，并选择关系。");
+      return;
+    }
+    if (title.length > 300 || reason.length > 4000) {
+      alert("书名最多 300 字符，原因最多 4000 字符。");
+      return;
+    }
+    if (!form.dataset.originalRelationId && state.relations.length >= 5000) {
+      alert("阅读关系已达到 5000 条上限，请先整理已有关系。");
+      return;
+    }
+
+    let detailUrl;
+    let coverUrl;
+    try {
+      detailUrl = validateOptionalHttpsUrl(form.elements.detailUrl.value, "书籍详情 URL");
+      coverUrl = validateOptionalHttpsUrl(form.elements.coverUrl.value, "书籍封面 URL");
+    } catch (error) {
+      alert(error.message);
+      return;
+    }
+
+    const currentBook =
+      findBook(form.dataset.currentBookId) || {
+        id: form.dataset.currentBookId,
+        title: form.dataset.currentTitle,
+        url: form.dataset.currentUrl,
+        cover: form.dataset.currentCover,
+      };
+    const knownTarget = allKnownBooks().find(
+      (book) => normalizeTitle(book.title) === normalizeTitle(title),
+    );
+    const targetBook = knownTarget || { id: "", title, url: detailUrl, cover: coverUrl };
+    if (knownTarget) {
+      targetBook.url = detailUrl || targetBook.url;
+      targetBook.cover = coverUrl || targetBook.cover;
+    }
+
+    const currentRef = await createRelationRef(currentBook);
+    const targetRef = await createRelationRef(targetBook);
+    if (currentRef.nodeId === targetRef.nodeId) {
+      alert("不能把一本书关联到它自己。");
+      return;
+    }
+    const outgoing = form.elements.direction.value === "outgoing";
+    const from = outgoing ? currentRef : targetRef;
+    const to = outgoing ? targetRef : currentRef;
+    const id = await relationIdForNodes(from.nodeId, to.nodeId);
+    const originalId = form.dataset.originalRelationId;
+    const original = state.relations.find((relation) => relation.id === originalId);
+    const duplicate = state.relations.find((relation) => relation.id === id);
+    const timestamp = nowIso();
+    const next = {
+      id,
+      from,
+      to,
+      type: form.elements.type.value,
+      reason,
+      createdAt: (duplicate || original || {}).createdAt || timestamp,
+      updatedAt: timestamp,
+    };
+
+    let relations = state.relations.filter(
+      (relation) => relation.id !== id && relation.id !== originalId,
+    );
+    if (originalId && originalId !== id) markDeleted("relations", originalId, timestamp);
+    delete state.syncMeta.tombstones.relations[id];
+    relations.push(next);
+    await saveRelations(relations);
+    closeRelationModal();
+    refreshNoteRelationSections(form.dataset.currentBookId);
+    refreshOpenGraph();
+  }
+
+  async function deleteRelation(relationId) {
+    const relation = state.relations.find((item) => item.id === relationId);
+    if (!relation || !confirm("确定删除这条阅读发现吗？")) return;
+    const timestamp = nowIso();
+    markDeleted("relations", relationId, timestamp);
+    await saveRelations(state.relations.filter((item) => item.id !== relationId));
+    const form = document.querySelector('#wr-topic-note-modal [data-wr-form="note"]');
+    if (form) refreshNoteRelationSections(form.dataset.bookId);
+    refreshOpenGraph();
+  }
+
+  function graphScopeData({ scope = "all", bookId = "", groupId = "" } = {}) {
+    let relations = [...state.relations];
+    const group = getGroups().find((item) => item.id === groupId);
+    const groupTitles = new Set(
+      (group && group.books ? group.books : []).map((book) =>
+        normalizeTitle(book.title),
+      ),
+    );
+    if (scope === "book") {
+      const book = findBook(bookId);
+      const normalized = normalizeTitle(book && book.title);
+      relations = relations.filter(
+        (relation) =>
+          relation.from.normalizedTitle === normalized ||
+          relation.to.normalizedTitle === normalized,
+      );
+    } else if (scope === "group") {
+      relations = relations.filter(
+        (relation) =>
+          groupTitles.has(relation.from.normalizedTitle) ||
+          groupTitles.has(relation.to.normalizedTitle),
+      );
+    }
+
+    const nodes = new Map();
+    relations.forEach((relation) => {
+      for (const ref of [relation.from, relation.to]) {
+        const book = relationRefBook(ref);
+        nodes.set(ref.nodeId, {
+          id: ref.nodeId,
+          label:
+            scope === "group" && !groupTitles.has(ref.normalizedTitle)
+              ? `组外 · ${book.title}`
+              : book.title,
+          title: book.title,
+          cover: book.cover || ref.coverUrl || "",
+          url: book.url || ref.detailUrl || "",
+          bookId: book.id || "",
+          outside: scope === "group" && !groupTitles.has(ref.normalizedTitle),
+        });
+      }
+    });
+    return { scope, bookId, groupId, group, relations, nodes: [...nodes.values()] };
+  }
+
+  function graphHasCycle(nodes, relations) {
+    const indegree = new Map(nodes.map((node) => [node.id, 0]));
+    const outgoing = new Map(nodes.map((node) => [node.id, []]));
+    relations.forEach((relation) => {
+      indegree.set(relation.to.nodeId, (indegree.get(relation.to.nodeId) || 0) + 1);
+      if (!outgoing.has(relation.from.nodeId)) outgoing.set(relation.from.nodeId, []);
+      outgoing.get(relation.from.nodeId).push(relation.to.nodeId);
+    });
+    const queue = [...indegree.entries()]
+      .filter(([, degree]) => degree === 0)
+      .map(([id]) => id);
+    let visited = 0;
+    while (queue.length) {
+      const id = queue.shift();
+      visited += 1;
+      (outgoing.get(id) || []).forEach((next) => {
+        const degree = indegree.get(next) - 1;
+        indegree.set(next, degree);
+        if (degree === 0) queue.push(next);
+      });
+    }
+    return visited !== nodes.length;
+  }
+
+  function graphLayoutOptions(data) {
+    return graphHasCycle(data.nodes, data.relations)
+      ? { name: "cose", animate: false, padding: 36, nodeRepulsion: 8000 }
+      : {
+          name: "breadthfirst",
+          directed: true,
+          animate: false,
+          padding: 36,
+          spacingFactor: 1.25,
+        };
+  }
+
+  function graphTitle(data) {
+    if (data.scope === "book") {
+      const book = findBook(data.bookId);
+      return book ? `${book.title} · 阅读关系` : "当前书籍关系";
+    }
+    if (data.scope === "group") {
+      return `${data.group ? data.group.name : "主题组"} · 阅读关系`;
+    }
+    return "全库阅读关系";
+  }
+
+  function graphElements(data) {
+    const nodes = data.nodes.map((node) => ({
+      group: "nodes",
+      data: {
+        ...node,
+        image: node.cover || "none",
+      },
+      classes: node.outside ? "outside" : "",
+    }));
+    const edges = data.relations.map((relation) => ({
+      group: "edges",
+      data: {
+        id: relation.id,
+        source: relation.from.nodeId,
+        target: relation.to.nodeId,
+        type: relation.type,
+        label: relationTypeLabel(relation.type),
+        reason: relation.reason,
+      },
+      classes: relation.type,
+    }));
+    return [...nodes, ...edges];
+  }
+
+  function graphInspectorHtml(kind, data) {
+    if (kind === "node") {
+      return `
+        <div class="wr-topic-graph-inspector-content">
+          ${coverMarkup({ title: data.title, cover: data.cover }, "wr-topic-relation-cover")}
+          <div><strong>${escapeHtml(data.title)}</strong>${data.outside ? '<span class="wr-topic-graph-outside">组外</span>' : ""}</div>
+        </div>
+        <div class="wr-topic-graph-inspector-actions">
+          ${data.bookId ? `<button class="wr-topic-btn" type="button" data-wr-action="open-graph-book" data-book-id="${escapeHtml(data.bookId)}">打开上下文</button>` : ""}
+          ${data.url ? `<button class="wr-topic-btn" type="button" data-wr-action="open-external" data-url="${escapeHtml(data.url)}">${iconSvg("external")}<span>书籍详情</span></button>` : ""}
+        </div>`;
+    }
+    const relation = state.relations.find((item) => item.id === data.id);
+    if (!relation) return "";
+    return `
+      <div class="wr-topic-graph-edge-title"><strong>${escapeHtml(relation.from.title)}</strong><span>→</span><strong>${escapeHtml(relation.to.title)}</strong></div>
+      <span class="wr-topic-relation-type ${escapeHtml(relation.type)}">${relationTypeLabel(relation.type)}</span>
+      <p>${escapeHtml(relation.reason)}</p>
+      <div class="wr-topic-graph-inspector-actions">
+        <button class="wr-topic-btn" type="button" data-wr-action="edit-relation" data-relation-id="${escapeHtml(relation.id)}">${iconSvg("edit")}<span>编辑</span></button>
+        <button class="wr-topic-btn danger" type="button" data-wr-action="delete-relation" data-relation-id="${escapeHtml(relation.id)}">${iconSvg("trash")}<span>删除</span></button>
+      </div>`;
+  }
+
+  function updateGraphInspector(kind, data) {
+    const inspector = document.querySelector("[data-wr-graph-inspector]");
+    if (inspector) inspector.innerHTML = graphInspectorHtml(kind, data);
+  }
+
+  function initializeGraph(data) {
+    const container = document.querySelector("[data-wr-graph-canvas]");
+    if (!container) return;
+    const cytoscapeFactory = window.cytoscape;
+    if (typeof cytoscapeFactory !== "function") {
+      container.innerHTML = '<div class="wr-topic-graph-error">关系图库未能加载。书籍上下文中的关系卡片仍可正常使用。</div>';
+      return;
+    }
+    if (state.graph) state.graph.destroy();
+    state.graph = cytoscapeFactory({
+      container,
+      elements: graphElements(data),
+      minZoom: 0.2,
+      maxZoom: 3,
+      layout: graphLayoutOptions(data),
+      style: [
+        {
+          selector: "node",
+          style: {
+            width: 70,
+            height: 94,
+            shape: "round-rectangle",
+            "background-color": "#edf1f7",
+            "background-image": "data(image)",
+            "background-fit": "cover",
+            "border-width": 2,
+            "border-color": "#8aaee0",
+            label: "data(label)",
+            color: "#1f2933",
+            "font-size": 10,
+            "text-wrap": "ellipsis",
+            "text-max-width": 92,
+            "text-valign": "bottom",
+            "text-margin-y": 15,
+          },
+        },
+        { selector: "node.outside", style: { "border-color": "#c8d0db", opacity: 0.72 } },
+        { selector: "node:selected", style: { "border-color": "#2f80ed", "border-width": 4 } },
+        {
+          selector: "edge",
+          style: {
+            width: 2,
+            "curve-style": "bezier",
+            "target-arrow-shape": "triangle",
+            "line-color": "#2f80ed",
+            "target-arrow-color": "#2f80ed",
+            label: "data(label)",
+            color: "#526070",
+            "font-size": 9,
+            "text-background-color": "#fff",
+            "text-background-opacity": 0.9,
+            "text-background-padding": 2,
+          },
+        },
+        { selector: "edge.author-citation", style: { "line-color": "#e68724", "target-arrow-color": "#e68724" } },
+        { selector: "edge.question-driven", style: { "line-color": "#2d9a5b", "target-arrow-color": "#2d9a5b" } },
+        { selector: ".wr-graph-hidden", style: { display: "none" } },
+      ],
+    });
+
+    let lastTap = { id: "", at: 0 };
+    state.graph.on("tap", "node", (event) => {
+      const node = event.target;
+      const item = node.data();
+      updateGraphInspector("node", item);
+      const now = Date.now();
+      if (lastTap.id === item.id && now - lastTap.at < 320) {
+        if (item.bookId) {
+          closeGraphModal();
+          openBookNote(item.bookId);
+        } else if (item.url) {
+          openExternalUrl(item.url);
+        } else {
+          const relation = data.relations.find(
+            (entry) => entry.from.nodeId === item.id || entry.to.nodeId === item.id,
+          );
+          if (relation) openRelationModal({ nodeId: item.id, relationId: relation.id });
+        }
+      }
+      lastTap = { id: item.id, at: now };
+    });
+    state.graph.on("tap", "edge", (event) =>
+      updateGraphInspector("edge", event.target.data()),
+    );
+  }
+
+  function openGraph(context = { scope: "all" }) {
+    closeGraphModal();
+    const data = graphScopeData(context);
+    state.graphContext = { ...context };
+    const modal = document.createElement("div");
+    modal.className = "wr-topic-modal wr-topic-nested-modal";
+    modal.id = "wr-topic-graph-modal";
+    modal.innerHTML = `
+      <div class="wr-topic-graph-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(graphTitle(data))}">
+        <div class="wr-topic-modal-head">
+          <h3>${escapeHtml(graphTitle(data))}</h3>
+          <button class="wr-topic-icon-btn" type="button" data-wr-action="close-graph" title="关闭" aria-label="关闭">${iconSvg("x")}</button>
+        </div>
+        ${data.relations.length ? `
+          <div class="wr-topic-graph-toolbar">
+            <input class="wr-topic-input" type="search" data-wr-action="graph-search" placeholder="搜索书名" aria-label="搜索书名">
+            <select class="wr-topic-input" data-wr-action="graph-filter" aria-label="筛选关系类型">
+              <option value="all">全部关系</option>
+              <option value="extended-reading">延伸阅读</option>
+              <option value="author-citation">作者引用</option>
+              <option value="question-driven">问题驱动</option>
+            </select>
+            <button class="wr-topic-icon-btn" type="button" data-wr-action="graph-fit" title="适应画布" aria-label="适应画布">${iconSvg("fit")}</button>
+            <button class="wr-topic-icon-btn" type="button" data-wr-action="graph-layout" title="重新布局" aria-label="重新布局">${iconSvg("network")}</button>
+          </div>
+          <div class="wr-topic-graph-body">
+            <div class="wr-topic-graph-canvas" data-wr-graph-canvas></div>
+            <aside class="wr-topic-graph-inspector" data-wr-graph-inspector><p>选择一本书或一条关系查看详情。</p></aside>
+          </div>` : '<div class="wr-topic-graph-empty">这个范围内还没有阅读关系。</div>'}
+      </div>`;
+    if (!safeAppend(getMountRoot(), modal, "graph modal")) return;
+    if (data.relations.length) window.setTimeout(() => initializeGraph(data), 0);
+  }
+
+  function closeGraphModal() {
+    if (state.graph) {
+      state.graph.destroy();
+      state.graph = null;
+    }
+    const modal = document.getElementById("wr-topic-graph-modal");
+    if (modal) modal.remove();
+    state.graphContext = null;
+  }
+
+  function refreshOpenGraph() {
+    const context = state.graphContext ? { ...state.graphContext } : null;
+    if (context) openGraph(context);
+  }
+
+  function filterGraph() {
+    if (!state.graph) return;
+    const query = normalizeTitle(
+      document.querySelector('[data-wr-action="graph-search"]')?.value || "",
+    );
+    const type =
+      document.querySelector('[data-wr-action="graph-filter"]')?.value || "all";
+    state.graph.elements().removeClass("wr-graph-hidden");
+    state.graph.edges().forEach((edge) => {
+      if (type !== "all" && edge.data("type") !== type) {
+        edge.addClass("wr-graph-hidden");
+      }
+    });
+    state.graph.nodes().forEach((node) => {
+      const hasVisibleEdge = node.connectedEdges().some((edge) => !edge.hasClass("wr-graph-hidden"));
+      const matches = !query || normalizeTitle(node.data("title")).includes(query);
+      if (!hasVisibleEdge || !matches) node.addClass("wr-graph-hidden");
+    });
+    state.graph.edges().forEach((edge) => {
+      if (
+        edge.source().hasClass("wr-graph-hidden") ||
+        edge.target().hasClass("wr-graph-hidden")
+      ) {
+        edge.addClass("wr-graph-hidden");
+      }
+    });
+  }
+
+  function openExternalUrl(url) {
+    if (!url) return;
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (opened) opened.opener = null;
   }
 
   async function saveBookNote(form) {
@@ -2989,6 +4317,8 @@
       actionEl.closest("#wr-topic-panel-root") ||
       actionEl.closest("#wr-topic-note-modal") ||
       actionEl.closest("#wr-topic-cloud-modal") ||
+      actionEl.closest("#wr-topic-relation-modal") ||
+      actionEl.closest("#wr-topic-graph-modal") ||
       actionEl.classList.contains("wr-topic-entry") ||
       actionEl.classList.contains("wr-book-context-icon") ||
       actionEl.classList.contains("wr-topic-shelf-group")
@@ -3080,15 +4410,50 @@
         actionEl.dataset.groupId,
         actionEl.dataset.bookId,
       );
-    if (action === "open-reader") {
-      const opened = window.open(
-        actionEl.dataset.url,
-        "_blank",
-        "noopener,noreferrer",
-      );
-      if (opened) opened.opener = null;
-    }
+    if (action === "open-reader" || action === "open-external")
+      openExternalUrl(actionEl.dataset.url);
     if (action === "open-book-note") openBookNote(actionEl.dataset.bookId);
+    if (action === "open-related-book") {
+      const form = document.querySelector('#wr-topic-note-modal [data-wr-form="note"]');
+      if (form) {
+        snapshotNoteDraft();
+        state.noteNavigationStack.push(form.dataset.bookId);
+      }
+      openBookNote(actionEl.dataset.bookId, { preserveHistory: true });
+    }
+    if (action === "back-book-note") {
+      snapshotNoteDraft();
+      const previous = state.noteNavigationStack.pop();
+      if (previous) openBookNote(previous, { preserveHistory: true });
+    }
+    if (action === "add-relation") {
+      openRelationModal({ bookId: actionEl.dataset.bookId, direction: "outgoing" });
+    }
+    if (action === "edit-relation") {
+      const noteForm = document.querySelector('#wr-topic-note-modal [data-wr-form="note"]');
+      openRelationModal({
+        bookId: noteForm ? noteForm.dataset.bookId : "",
+        relationId: actionEl.dataset.relationId,
+      });
+    }
+    if (action === "delete-relation") await deleteRelation(actionEl.dataset.relationId);
+    if (action === "close-relation-modal") closeRelationModal();
+    if (action === "open-graph") {
+      openGraph({
+        scope: actionEl.dataset.scope || "all",
+        bookId: actionEl.dataset.bookId || "",
+        groupId: actionEl.dataset.groupId || "",
+      });
+    }
+    if (action === "close-graph") closeGraphModal();
+    if (action === "graph-fit" && state.graph) state.graph.fit(undefined, 36);
+    if (action === "graph-layout" && state.graph && state.graphContext) {
+      state.graph.layout(graphLayoutOptions(graphScopeData(state.graphContext))).run();
+    }
+    if (action === "open-graph-book") {
+      closeGraphModal();
+      openBookNote(actionEl.dataset.bookId);
+    }
     if (action === "close-note-modal") closeNoteModal();
     if (action === "delete-book-note")
       await deleteBookNote(actionEl.dataset.bookId);
@@ -3104,11 +4469,12 @@
     if (form.dataset.wrForm === "group") await saveGroupFromForm(form);
     if (form.dataset.wrForm === "note") await saveBookNote(form);
     if (form.dataset.wrForm === "cloud") await saveCloudSettings(form);
+    if (form.dataset.wrForm === "relation") await saveRelationFromForm(form);
   }
 
   function onInput(event) {
     const actionEl = event.target.closest(
-      '[data-wr-action="filter-books"], [data-wr-action="filter-catalog"]',
+      '[data-wr-action="filter-books"], [data-wr-action="filter-catalog"], [data-wr-action="relation-title"], [data-wr-action="graph-search"]',
     );
     if (!actionEl) return;
 
@@ -3118,14 +4484,36 @@
       return;
     }
 
+    if (actionEl.dataset.wrAction === "relation-title") {
+      fillRelationCandidate(actionEl);
+      return;
+    }
+
+    if (actionEl.dataset.wrAction === "graph-search") {
+      filterGraph();
+      return;
+    }
+
     state.catalogQuery = actionEl.value || "";
     const list = document.querySelector("[data-wr-catalog-list]");
     if (list) list.innerHTML = catalogListHtml();
   }
 
+  function onChange(event) {
+    if (event.target.matches('[data-wr-action="graph-filter"]')) filterGraph();
+    if (event.target.matches('#wr-topic-relation-modal [name="direction"]')) {
+      const form = event.target.closest('[data-wr-form="relation"]');
+      if (form) activateExistingRelation(form);
+    }
+  }
+
   function onKeydown(event) {
     if (event.key !== "Escape") return;
-    if (document.getElementById("wr-topic-cloud-modal")) {
+    if (document.getElementById("wr-topic-relation-modal")) {
+      closeRelationModal();
+    } else if (document.getElementById("wr-topic-graph-modal")) {
+      closeGraphModal();
+    } else if (document.getElementById("wr-topic-cloud-modal")) {
       closeCloudSettings();
     } else if (document.getElementById("wr-topic-note-modal")) {
       closeNoteModal();
@@ -3140,6 +4528,7 @@
     document.addEventListener("click", onClick, true);
     document.addEventListener("submit", onSubmit, true);
     document.addEventListener("input", onInput, true);
+    document.addEventListener("change", onChange, true);
     document.addEventListener("keydown", onKeydown, true);
     state.listenersBound = true;
   }
