@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.4.1
+// @version      0.4.2
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -704,6 +704,8 @@
       info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
       library:
         '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
+      bookOpen:
+        '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3Z"/><path d="M21 18a1 1 0 0 0 1-1V5a2 2 0 0 0-2-2h-5a3 3 0 0 0-3 3v15a3 3 0 0 1 3-3Z"/>',
       network:
         '<circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="m12 7-6 10"/><path d="m12 7 6 10"/><path d="M7 19h10"/>',
       plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
@@ -1603,9 +1605,12 @@
         width: 30px;
         height: 30px;
         min-height: 30px;
-        display: grid;
-        place-items: center;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
         padding: 0;
+        font-size: 0;
+        line-height: 0;
       }
 
       .wr-topic-detail-icon-btn .wr-topic-icon {
@@ -1748,9 +1753,12 @@
         width: 28px;
         height: 28px;
         min-height: 28px;
-        display: grid;
-        place-items: center;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
         padding: 0;
+        font-size: 0;
+        line-height: 0;
         opacity: 0;
         pointer-events: none;
         transform: translateY(-2px);
@@ -1862,6 +1870,19 @@
         align-items: center;
         margin: 14px 0 16px;
         min-width: 0;
+      }
+
+      .wr-topic-modal-book-info {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .wr-topic-modal-reader-btn {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
       }
 
       .wr-topic-modal-book img {
@@ -2145,13 +2166,16 @@
       .wr-topic-relation-actions button {
         width: 25px;
         height: 25px;
-        display: grid;
-        place-items: center;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
         border: 1px solid var(--wr-topic-border);
         border-radius: 5px;
         padding: 0;
         background: rgba(255, 255, 255, .96);
         color: #526070;
+        font-size: 0;
+        line-height: 0;
       }
 
       .wr-topic-relation-actions button.danger {
@@ -3054,11 +3078,11 @@
             const contextLabel = context || "暂无阅读上下文，点击添加";
             return `
               <article class="wr-topic-group-book-card">
-                <button class="wr-topic-group-book-cover-action" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}" aria-label="进入阅读：${escapeHtml(book.title)}">
+                <button class="wr-topic-group-book-cover-action" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" aria-label="打开书籍阅读上下文：${escapeHtml(book.title)}">
                   <img class="wr-topic-group-book-cover" src="${escapeHtml(book.cover)}" alt="">
                 </button>
                 <div class="wr-topic-group-book-content">
-                  <button class="wr-topic-group-book-title-action" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</button>
+                  <button class="wr-topic-group-book-title-action" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文：${escapeHtml(book.title)}">${escapeHtml(book.title)}</button>
                   <button class="wr-topic-group-book-context ${context ? "" : "is-empty"}" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文">${escapeHtml(contextLabel)}</button>
                 </div>
                 <button class="wr-topic-btn danger wr-topic-group-book-remove" type="button" data-wr-action="remove-book" data-group-id="${escapeHtml(group.id)}" data-book-id="${escapeHtml(book.id)}" title="从主题组移除" aria-label="从主题组移除">${iconSvg("trash")}</button>
@@ -3620,10 +3644,11 @@
         </div>
         <div class="wr-topic-modal-book">
           ${coverMarkup(book, "wr-topic-modal-book-cover")}
-          <div>
+          <div class="wr-topic-modal-book-info">
             <span class="wr-topic-book-title">${escapeHtml(book.title)}</span>
             <span class="wr-topic-book-author">${escapeHtml(book.author)}</span>
           </div>
+          ${book.url ? `<button class="wr-topic-btn wr-topic-modal-reader-btn" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}">${iconSvg("bookOpen")}<span>${text.openReader}</span></button>` : ""}
         </div>
         <form class="wr-topic-form" data-wr-form="note" data-book-id="${escapeHtml(bookId)}" data-obsidian-authoritative="${obsidianAuthoritative ? "1" : "0"}">
           <div class="wr-topic-note-scroll">
@@ -3982,13 +4007,22 @@
 
   function graphLayoutOptions(data) {
     return graphHasCycle(data.nodes, data.relations)
-      ? { name: "cose", animate: false, padding: 36, nodeRepulsion: 8000 }
+      ? {
+          name: "cose",
+          animate: false,
+          padding: 44,
+          nodeRepulsion: 10000,
+          idealEdgeLength: 180,
+          nodeOverlap: 40,
+          nodeDimensionsIncludeLabels: true,
+        }
       : {
           name: "breadthfirst",
           directed: true,
           animate: false,
-          padding: 36,
-          spacingFactor: 1.25,
+          padding: 44,
+          spacingFactor: 1.8,
+          nodeDimensionsIncludeLabels: true,
         };
   }
 
@@ -4089,7 +4123,7 @@
             "text-wrap": "ellipsis",
             "text-max-width": 92,
             "text-valign": "bottom",
-            "text-margin-y": 15,
+            "text-margin-y": 10,
           },
         },
         { selector: "node.outside", style: { "border-color": "#c8d0db", opacity: 0.72 } },
