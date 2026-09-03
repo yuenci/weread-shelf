@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.4.2
+// @version      0.4.3
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -4010,18 +4010,18 @@
       ? {
           name: "cose",
           animate: false,
-          padding: 44,
-          nodeRepulsion: 10000,
-          idealEdgeLength: 180,
-          nodeOverlap: 40,
+          padding: 36,
+          nodeRepulsion: 7500,
+          idealEdgeLength: 140,
+          nodeOverlap: 30,
           nodeDimensionsIncludeLabels: true,
         }
       : {
           name: "breadthfirst",
           directed: true,
           animate: false,
-          padding: 44,
-          spacingFactor: 1.8,
+          padding: 36,
+          spacingFactor: 1.3,
           nodeDimensionsIncludeLabels: true,
         };
   }
