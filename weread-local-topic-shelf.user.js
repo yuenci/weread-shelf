@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.4.3
+// @version      0.4.4
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -82,6 +82,7 @@
     noteDrafts: {},
     graph: null,
     graphContext: null,
+    routeActive: false,
   };
 
   const text = {
@@ -527,6 +528,10 @@
       dbSet(STORE.notes, nextNotes),
       dbSet(STORE.relations, nextRelations),
     ]);
+    if (!isShelfEnhancementRoute()) {
+      deactivateShelfEnhancements();
+      return;
+    }
     if (!state.formMode && !document.getElementById("wr-topic-note-modal")) {
       refreshShelf();
     } else {
@@ -546,6 +551,25 @@
         (String(context.context || "").trim() ||
           String(context.question || "").trim()),
     );
+  }
+
+  function bookHasReadingContext(bookId) {
+    return (
+      hasObsidianReadingContext(getObsidianContext(bookId)) ||
+      hasReadingContext(getNotes()[bookId])
+    );
+  }
+
+  function groupContextProgress(group) {
+    const books = Array.isArray(group && group.books) ? group.books : [];
+    return {
+      completed: books.filter((book) => bookHasReadingContext(book.id)).length,
+      total: books.length,
+    };
+  }
+
+  function isShelfEnhancementRoute(pathname = window.location.pathname) {
+    return String(pathname || "").replace(/\/+$/, "") === "/web/shelf";
   }
 
   function getBookContextSummary(bookId) {
@@ -1293,13 +1317,29 @@
       }
 
       .wr-topic-group-meta {
-        display: block;
+        min-width: 0;
         max-width: 100%;
         overflow: hidden;
-        margin-top: 8px;
         color: #8a94a6;
         font-size: 12px;
         text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .wr-topic-group-footer {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 8px;
+      }
+
+      .wr-topic-group-progress {
+        flex: 0 0 auto;
+        color: #526070;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }
 
@@ -2564,6 +2604,11 @@
   }
 
   function ensureFloatingButton() {
+    if (!isShelfEnhancementRoute()) {
+      document.getElementById("wr-topic-floating-button")?.remove();
+      return;
+    }
+
     let button = document.getElementById("wr-topic-floating-button");
 
     if (!button) {
@@ -2949,7 +2994,55 @@
     });
   }
 
+  function deactivateShelfEnhancements() {
+    if (
+      !state.routeActive &&
+      !document.querySelector(
+        "#wr-topic-floating-button, #wr-local-topic-style, .wr-topic-shelf-group, .wr-book-context-icon, [data-wr-local-hidden]",
+      )
+    ) {
+      return;
+    }
+
+    document
+      .querySelectorAll(".wr-topic-shelf-group, .wr-book-context-icon")
+      .forEach((element) => element.remove());
+    document.querySelectorAll("a.shelfBook").forEach((link) => {
+      if (link.dataset.wrLocalHidden) {
+        link.style.display = "";
+        delete link.dataset.wrLocalHidden;
+      }
+      link.classList.remove("wr-book-has-context");
+    });
+
+    if (state.graph) {
+      state.graph.destroy();
+      state.graph = null;
+    }
+    [
+      "wr-topic-floating-button",
+      "wr-topic-panel-root",
+      "wr-topic-note-modal",
+      "wr-topic-cloud-modal",
+      "wr-topic-relation-modal",
+      "wr-topic-graph-modal",
+      "wr-local-topic-style",
+    ].forEach((id) => document.getElementById(id)?.remove());
+
+    state.routeActive = false;
+    state.lastShelfSignature = "";
+    state.formMode = "";
+    state.editingGroupId = "";
+    state.noteNavigationStack = [];
+    state.noteDrafts = {};
+    state.graphContext = null;
+  }
+
   function refreshShelf() {
+    if (!isShelfEnhancementRoute()) {
+      deactivateShelfEnhancements();
+      return;
+    }
     scanBooks();
     renderShelfGroups();
     applyHiddenBooks();
@@ -3039,15 +3132,19 @@
     return `
       <div class="wr-topic-group-list">
         ${groups
-          .map(
-            (group) => `
+          .map((group) => {
+            const progress = groupContextProgress(group);
+            return `
           <button class="wr-topic-group-card ${group.id === state.selectedGroupId ? "active" : ""}" type="button" data-wr-action="select-group" data-group-id="${escapeHtml(group.id)}">
             <span class="wr-topic-group-name">${escapeHtml(group.name)}</span>
             <span class="wr-topic-group-desc">${escapeHtml(group.description || "暂无描述")}</span>
-            <span class="wr-topic-group-meta">${(group.books || []).length} 本书</span>
+            <span class="wr-topic-group-footer">
+              <span class="wr-topic-group-meta">${progress.total} 本书</span>
+              <span class="wr-topic-group-progress" title="有阅读上下文 ${progress.completed} / ${progress.total} 本">${progress.completed}/${progress.total}</span>
+            </span>
           </button>
-        `,
-          )
+        `;
+          })
           .join("")}
       </div>
     `;
@@ -3422,6 +3519,7 @@
   }
 
   async function openPanel() {
+    if (!isShelfEnhancementRoute()) return;
     let root = document.getElementById("wr-topic-panel-root");
     if (!root) {
       root = document.createElement("div");
@@ -4316,6 +4414,10 @@
     let stableTimes = 0;
 
     for (let i = 0; i < 50; i++) {
+      if (!isShelfEnhancementRoute()) {
+        deactivateShelfEnhancements();
+        return;
+      }
       const count = document.querySelectorAll(SELECTORS.shelfBook).length;
 
       if (count === lastCount) stableTimes += 1;
@@ -4334,6 +4436,7 @@
   }
 
   async function onClick(event) {
+    if (!isShelfEnhancementRoute()) return;
     const actionEl = event.target.closest("[data-wr-action]");
     if (!actionEl) return;
 
@@ -4560,25 +4663,38 @@
   }
 
   async function init() {
-    injectStyle();
-    bindEventListeners();
-    ensureFloatingButton();
     await ensureStorageReady();
-    await waitForShelfList();
-    refreshShelf();
-    if (isCloudConfigured()) scheduleCloudSync(300);
 
-    window.setInterval(() => {
+    const maintainShelfRoute = () => {
+      if (!isShelfEnhancementRoute()) {
+        deactivateShelfEnhancements();
+        return;
+      }
+
+      const enteringRoute = !state.routeActive;
+      state.routeActive = true;
+      injectStyle();
+      bindEventListeners();
       ensureFloatingButton();
+      if (!document.querySelector(SELECTORS.shelfList)) return;
+
       const signature = getShelfSignature();
-      if (signature === state.lastShelfSignature) return;
+      if (!enteringRoute && signature === state.lastShelfSignature) return;
       state.lastShelfSignature = signature;
       refreshShelf();
-    }, 1500);
+    };
+
+    maintainShelfRoute();
+    if (isShelfEnhancementRoute() && isCloudConfigured()) scheduleCloudSync(300);
+
+    window.setInterval(() => {
+      maintainShelfRoute();
+    }, 500);
 
     window.setInterval(() => {
       if (
         document.visibilityState === "visible" &&
+        isShelfEnhancementRoute() &&
         isCloudConfigured() &&
         Date.now() - state.lastCloudPullAt >= CLOUD_PULL_INTERVAL
       ) {
@@ -4588,10 +4704,13 @@
       }
     }, 60 * 1000);
 
-    window.addEventListener("online", () => scheduleCloudSync(300));
+    window.addEventListener("online", () => {
+      if (isShelfEnhancementRoute()) scheduleCloudSync(300);
+    });
     document.addEventListener("visibilitychange", () => {
       if (
         document.visibilityState === "visible" &&
+        isShelfEnhancementRoute() &&
         Date.now() - state.lastCloudPullAt >= CLOUD_PULL_INTERVAL
       ) {
         scheduleCloudSync(300);
