@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.4.4
+// @version      0.5.0
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -19,6 +19,7 @@
     groups: "weread_local_topic_shelf_groups_v1",
     notes: "weread_local_book_context_notes_v1",
     relations: "weread_local_reading_relations_v1",
+    readingLevels: "weread_local_reading_levels_v1",
     cloudConfig: "weread_cloud_sync_config_v1",
     syncMeta: "weread_cloud_sync_meta_v1",
     obsidianCache: "weread_obsidian_catalog_cache_v1",
@@ -28,6 +29,7 @@
   const CLOUD_SCHEMA_VERSION = 2;
   const CLOUD_PUSH_DELAY = 1800;
   const CLOUD_PULL_INTERVAL = 5 * 60 * 1000;
+  const READING_LEVELS = new Set(["deep", "light", "casual"]);
 
   const SELECTORS = {
     shelfList: ".shelf_list",
@@ -41,6 +43,7 @@
     groups: [],
     notes: {},
     relations: [],
+    readingLevels: {},
     db: null,
     selectedGroupId: "",
     formMode: "",
@@ -69,6 +72,8 @@
     panelTab: "groups",
     catalogFilter: "in",
     catalogQuery: "",
+    levelFilter: "all",
+    levelQuery: "",
     catalogLoading: false,
     obsidianCache: {
       books: [],
@@ -127,6 +132,7 @@
     syncNow: "立即同步",
     cloudSettingsTitle: "Cloudflare KV 云同步",
     catalog: "书目匹配",
+    gradedReading: "分级阅读",
   };
 
   const DB_NAME = "weread_local_topic_shelf_db";
@@ -158,6 +164,7 @@
         groups: {},
         notes: {},
         relations: {},
+        levels: {},
       },
     };
   }
@@ -221,6 +228,7 @@
     let groups = await dbGet(STORE.groups, null);
     let notes = await dbGet(STORE.notes, null);
     let relations = await dbGet(STORE.relations, null);
+    let readingLevels = await dbGet(STORE.readingLevels, null);
     const cloudConfig = await dbGet(STORE.cloudConfig, null);
     const syncMeta = await dbGet(STORE.syncMeta, null);
     const obsidianCache = await dbGet(STORE.obsidianCache, null);
@@ -242,9 +250,18 @@
       await dbSet(STORE.relations, relations);
     }
 
+    if (readingLevels === null) {
+      readingLevels = {};
+      await dbSet(STORE.readingLevels, readingLevels);
+    }
+
     state.groups = Array.isArray(groups) ? groups : [];
     state.notes = notes && typeof notes === "object" ? notes : {};
     state.relations = Array.isArray(relations) ? relations : [];
+    state.readingLevels =
+      readingLevels && typeof readingLevels === "object" && !Array.isArray(readingLevels)
+        ? readingLevels
+        : {};
     state.cloudConfig = {
       ...state.cloudConfig,
       ...(cloudConfig && typeof cloudConfig === "object" ? cloudConfig : {}),
@@ -273,6 +290,13 @@
           syncMeta.tombstones.relations &&
           typeof syncMeta.tombstones.relations === "object"
             ? syncMeta.tombstones.relations
+            : {},
+        levels:
+          syncMeta &&
+          syncMeta.tombstones &&
+          syncMeta.tombstones.levels &&
+          typeof syncMeta.tombstones.levels === "object"
+            ? syncMeta.tombstones.levels
             : {},
       },
     };
@@ -346,6 +370,12 @@
     await markLocalChange();
   }
 
+  async function saveReadingLevels(readingLevels) {
+    state.readingLevels = readingLevels;
+    await dbSet(STORE.readingLevels, readingLevels);
+    await markLocalChange();
+  }
+
   function isCloudConfigured(config = state.cloudConfig) {
     return Boolean(
       config &&
@@ -400,7 +430,12 @@
   function markDeleted(type, id, deletedAt = nowIso()) {
     if (!state.syncMeta) state.syncMeta = defaultSyncMeta();
     if (!state.syncMeta.tombstones) {
-      state.syncMeta.tombstones = { groups: {}, notes: {}, relations: {} };
+      state.syncMeta.tombstones = {
+        groups: {},
+        notes: {},
+        relations: {},
+        levels: {},
+      };
     }
     if (!state.syncMeta.tombstones[type]) {
       state.syncMeta.tombstones[type] = {};
@@ -421,6 +456,10 @@
       relations:
         value && value.relations && typeof value.relations === "object"
           ? value.relations
+          : {},
+      levels:
+        value && value.levels && typeof value.levels === "object"
+          ? value.levels
           : {},
     };
   }
@@ -503,6 +542,10 @@
     const nextRelations = Array.isArray(payload.relations)
       ? payload.relations
       : state.relations;
+    const nextReadingLevels =
+      payload.levels && typeof payload.levels === "object" && !Array.isArray(payload.levels)
+        ? payload.levels
+        : state.readingLevels;
     const nextTombstones = normalizeTombstones(payload.tombstones);
     if (
       !Array.isArray(payload.relations) &&
@@ -510,16 +553,24 @@
     ) {
       nextTombstones.relations = state.syncMeta.tombstones.relations || {};
     }
+    if (
+      (!payload.levels || typeof payload.levels !== "object" || Array.isArray(payload.levels)) &&
+      (!payload.tombstones || !payload.tombstones.levels)
+    ) {
+      nextTombstones.levels = state.syncMeta.tombstones.levels || {};
+    }
     const changed =
       JSON.stringify(state.groups) !== JSON.stringify(nextGroups) ||
       JSON.stringify(state.notes) !== JSON.stringify(nextNotes) ||
       JSON.stringify(state.relations) !== JSON.stringify(nextRelations) ||
+      JSON.stringify(state.readingLevels) !== JSON.stringify(nextReadingLevels) ||
       JSON.stringify(state.syncMeta.tombstones) !==
         JSON.stringify(nextTombstones);
 
     state.groups = nextGroups;
     state.notes = nextNotes;
     state.relations = nextRelations;
+    state.readingLevels = nextReadingLevels;
     state.syncMeta.tombstones = nextTombstones;
     if (!changed) return;
 
@@ -527,6 +578,7 @@
       dbSet(STORE.groups, nextGroups),
       dbSet(STORE.notes, nextNotes),
       dbSet(STORE.relations, nextRelations),
+      dbSet(STORE.readingLevels, nextReadingLevels),
     ]);
     if (!isShelfEnhancementRoute()) {
       deactivateShelfEnhancements();
@@ -645,6 +697,7 @@
       groups: state.groups,
       notes: state.notes,
       relations: state.relations,
+      levels: state.readingLevels,
       tombstones: state.syncMeta.tombstones,
     });
     await applyWereadSyncResponse(result.body);
@@ -730,6 +783,10 @@
         '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
       bookOpen:
         '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3Z"/><path d="M21 18a1 1 0 0 0 1-1V5a2 2 0 0 0-2-2h-5a3 3 0 0 0-3 3v15a3 3 0 0 1 3-3Z"/>',
+      check: '<path d="m20 6-11 11-5-5"/>',
+      chevronRight: '<path d="m9 18 6-6-6-6"/>',
+      moreVertical:
+        '<circle cx="12" cy="5" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1" fill="currentColor" stroke="none"/>',
       network:
         '<circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="m12 7-6 10"/><path d="m12 7 6 10"/><path d="M7 19h10"/>',
       plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
@@ -1463,6 +1520,213 @@
         gap: 6px;
       }
 
+      .wr-topic-graded {
+        height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding: 22px 26px 0;
+        background: #fbfbfa;
+      }
+
+      .wr-topic-graded-head,
+      .wr-topic-graded-controls,
+      .wr-topic-graded-stats,
+      .wr-topic-graded-filters {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .wr-topic-graded-head {
+        justify-content: space-between;
+        margin-bottom: 14px;
+      }
+
+      .wr-topic-graded-head p {
+        margin: 4px 0 0;
+        color: var(--wr-topic-muted);
+        font-size: 12px;
+      }
+
+      .wr-topic-graded-stats {
+        margin-bottom: 14px;
+      }
+
+      .wr-topic-graded-stat {
+        min-width: 112px;
+        border: 0;
+        border-left: 3px solid #cad1dc;
+        padding: 6px 10px;
+        background: #fff;
+        color: inherit;
+        text-align: left;
+      }
+
+      .wr-topic-graded-stat:hover,
+      .wr-topic-graded-stat.active {
+        border-left-color: var(--wr-topic-blue);
+        background: rgba(47, 128, 237, .05);
+      }
+
+      .wr-topic-graded-stat strong,
+      .wr-topic-graded-stat span {
+        display: block;
+      }
+
+      .wr-topic-graded-stat strong {
+        font-size: 18px;
+      }
+
+      .wr-topic-graded-stat span {
+        margin-top: 2px;
+        color: var(--wr-topic-muted);
+        font-size: 11px;
+      }
+
+      .wr-topic-graded-controls {
+        margin-bottom: 14px;
+      }
+
+      .wr-topic-graded-search {
+        flex: 1 1 240px;
+        max-width: 380px;
+      }
+
+      .wr-topic-graded-list {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        padding: 0 5px 28px 0;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(82, 96, 112, .48) transparent;
+      }
+
+      .wr-topic-graded-list::-webkit-scrollbar {
+        width: 4px;
+      }
+
+      .wr-topic-graded-list::-webkit-scrollbar-thumb {
+        border-radius: 999px;
+        background: rgba(82, 96, 112, .48);
+      }
+
+      .wr-topic-graded-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .wr-topic-graded-card {
+        min-width: 0;
+        height: 142px;
+        display: grid;
+        grid-template-columns: 78px minmax(0, 1fr);
+        gap: 12px;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 8px;
+        padding: 10px;
+        overflow: hidden;
+        background: #fff;
+        color: inherit;
+        text-align: left;
+      }
+
+      .wr-topic-graded-card:hover,
+      .wr-topic-graded-card:focus-visible {
+        border-color: rgba(47, 128, 237, .42);
+        box-shadow: 0 6px 18px rgba(15, 23, 42, .06);
+      }
+
+      .wr-topic-graded-cover {
+        width: 78px;
+        height: 120px;
+        display: grid;
+        place-items: center;
+        border-radius: 4px;
+        object-fit: cover;
+        background: #edf1f7;
+        color: #6b7b93;
+        font-size: 20px;
+        font-weight: 700;
+      }
+
+      .wr-topic-graded-content {
+        min-width: 0;
+        height: 120px;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .wr-topic-graded-title {
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        overflow: hidden;
+        font-size: 13px;
+        font-weight: 650;
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
+      .wr-topic-graded-author {
+        overflow: hidden;
+        margin-top: 3px;
+        color: var(--wr-topic-muted);
+        font-size: 11px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .wr-topic-graded-context {
+        display: -webkit-box;
+        flex: 1 1 auto;
+        min-height: 0;
+        margin-top: 6px;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        overflow: hidden;
+        color: #526070;
+        font-size: 10px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .wr-topic-graded-context.is-empty {
+        color: #8a94a6;
+      }
+
+      .wr-topic-level-badge {
+        align-self: flex-start;
+        flex: 0 0 auto;
+        margin-top: 5px;
+        border-radius: 4px;
+        padding: 2px 6px;
+        background: #edf1f7;
+        color: #526070;
+        font-size: 10px;
+        line-height: 1.4;
+      }
+
+      .wr-topic-level-badge.deep {
+        background: #e9f2ff;
+        color: #1768c5;
+      }
+
+      .wr-topic-level-badge.light {
+        background: #eaf8f0;
+        color: #16794a;
+      }
+
+      .wr-topic-level-badge.casual {
+        background: #fff4df;
+        color: #946200;
+      }
+
       .wr-topic-badge {
         border-radius: 4px;
         padding: 3px 7px;
@@ -1684,7 +1948,7 @@
         align-content: start;
         overflow-x: hidden;
         overflow-y: auto;
-        padding-right: 6px;
+        padding: 0 6px 30px 0;
       }
 
       .wr-topic-group-book-card {
@@ -1698,13 +1962,14 @@
         border: 1px solid var(--wr-topic-border);
         border-radius: 8px;
         padding: 12px;
-        overflow: hidden;
+        overflow: visible;
         background: #fff;
         transition: border-color .16s ease, box-shadow .16s ease;
       }
 
       .wr-topic-group-book-card:hover,
       .wr-topic-group-book-card:focus-within {
+        z-index: 3;
         border-color: rgba(47, 128, 237, .34);
         box-shadow: 0 8px 22px rgba(15, 23, 42, .07);
       }
@@ -1786,10 +2051,14 @@
         color: #8a94a6;
       }
 
-      .wr-topic-group-book-remove {
+      .wr-topic-group-book-menu {
         position: absolute;
         top: 8px;
         right: 8px;
+        z-index: 5;
+      }
+
+      .wr-topic-group-book-menu-button {
         width: 28px;
         height: 28px;
         min-height: 28px;
@@ -1805,14 +2074,71 @@
         transition: opacity .16s ease, transform .16s ease;
       }
 
-      .wr-topic-group-book-card:hover .wr-topic-group-book-remove,
-      .wr-topic-group-book-card:focus-within .wr-topic-group-book-remove {
+      .wr-topic-group-book-card:hover .wr-topic-group-book-menu-button,
+      .wr-topic-group-book-card:focus-within .wr-topic-group-book-menu-button {
         opacity: 1;
         pointer-events: auto;
         transform: translateY(0);
       }
 
-      .wr-topic-group-book-remove .wr-topic-icon {
+      .wr-topic-group-book-menu-button .wr-topic-icon {
+        width: 14px;
+        height: 14px;
+      }
+
+      .wr-topic-book-menu-popover,
+      .wr-topic-level-submenu {
+        position: absolute;
+        z-index: 10;
+        width: 150px;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 6px;
+        padding: 4px;
+        background: #fff;
+        box-shadow: 0 10px 28px rgba(15, 23, 42, .16);
+      }
+
+      .wr-topic-book-menu-popover {
+        top: 32px;
+        right: 0;
+      }
+
+      .wr-topic-level-submenu {
+        top: -5px;
+        right: calc(100% + 6px);
+      }
+
+      .wr-topic-book-menu-popover[hidden],
+      .wr-topic-level-submenu[hidden] {
+        display: none;
+      }
+
+      .wr-topic-book-menu-item {
+        width: 100%;
+        min-height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        border: 0;
+        border-radius: 4px;
+        padding: 6px 8px;
+        background: transparent;
+        color: var(--wr-topic-text);
+        font-size: 12px;
+        text-align: left;
+      }
+
+      .wr-topic-book-menu-item:hover,
+      .wr-topic-book-menu-item:focus-visible {
+        background: #f3f6fa;
+      }
+
+      .wr-topic-book-menu-item.danger {
+        color: var(--wr-topic-danger);
+      }
+
+      .wr-topic-book-menu-item .wr-topic-icon {
         width: 14px;
         height: 14px;
       }
@@ -1915,6 +2241,27 @@
       .wr-topic-modal-book-info {
         min-width: 0;
         flex: 1 1 auto;
+      }
+
+      .wr-topic-modal-book-tools {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+      }
+
+      .wr-topic-modal-level {
+        display: grid;
+        gap: 4px;
+        color: var(--wr-topic-muted);
+        font-size: 11px;
+      }
+
+      .wr-topic-modal-level .wr-topic-input {
+        width: 116px;
+        min-height: 32px;
+        padding: 5px 26px 5px 8px;
+        font-size: 12px;
       }
 
       .wr-topic-modal-reader-btn {
@@ -2418,7 +2765,7 @@
         text-align: center;
       }
 
-      @media (max-width: 760px) {
+      @media (max-width: 840px) {
         .wr-topic-nested-modal {
           padding: 12px;
         }
@@ -2496,6 +2843,20 @@
           grid-template-columns: 1fr;
         }
 
+        .wr-topic-graded-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .wr-topic-modal-book {
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+
+        .wr-topic-modal-book-tools {
+          margin-left: auto;
+          justify-content: flex-end;
+        }
+
         .wr-topic-note-actions {
           align-items: stretch;
         }
@@ -2536,7 +2897,7 @@
       }
 
       @media (hover: none) {
-        .wr-topic-group-book-remove,
+        .wr-topic-group-book-menu-button,
         .wr-topic-relation-actions {
           opacity: 1;
           pointer-events: auto;
@@ -2687,7 +3048,118 @@
     }
 
     const note = getNotes()[bookId];
-    return note ? note.book : null;
+    if (note && note.book) return note.book;
+
+    const levelRecord = state.readingLevels[bookId];
+    return levelRecord && levelRecord.book ? levelRecord.book : null;
+  }
+
+  function readingLevelLabel(level) {
+    return {
+      deep: "深度阅读",
+      light: "轻度阅读",
+      casual: "随便读读",
+      unclassified: "未分级",
+    }[level] || "未分级";
+  }
+
+  function readingLevelForBook(bookId) {
+    const level = state.readingLevels[bookId]?.level;
+    return READING_LEVELS.has(level) ? level : "unclassified";
+  }
+
+  function readingLevelOptionsHtml(bookId) {
+    const current = readingLevelForBook(bookId);
+    return [
+      ["unclassified", "未分级"],
+      ["deep", "深度阅读"],
+      ["light", "轻度阅读"],
+      ["casual", "随便读读"],
+    ]
+      .map(
+        ([value, label]) =>
+          `<option value="${value}" ${current === value ? "selected" : ""}>${label}</option>`,
+      )
+      .join("");
+  }
+
+  function snapshotReadingLevelBook(book) {
+    return {
+      id: String(book.id || ""),
+      title: String(book.title || ""),
+      author: String(book.author || ""),
+      url: String(book.url || ""),
+      cover: String(book.cover || ""),
+    };
+  }
+
+  async function setReadingLevel(bookId, nextLevel) {
+    const normalizedLevel = READING_LEVELS.has(nextLevel)
+      ? nextLevel
+      : "unclassified";
+    const currentLevel = readingLevelForBook(bookId);
+    if (currentLevel === normalizedLevel) return;
+
+    const next = { ...state.readingLevels };
+    const updatedAt = nowIso();
+    if (normalizedLevel === "unclassified") {
+      if (!next[bookId]) return;
+      delete next[bookId];
+      markDeleted("levels", bookId, updatedAt);
+    } else {
+      const book = findBook(bookId);
+      if (!book) throw new Error("找不到这本书，无法保存阅读分级。");
+      next[bookId] = {
+        book: snapshotReadingLevelBook(book),
+        level: normalizedLevel,
+        updatedAt,
+      };
+      delete state.syncMeta.tombstones.levels[bookId];
+    }
+
+    await saveReadingLevels(next);
+    closeBookMenus();
+    renderPanel();
+  }
+
+  function gradedReadingLibraryBooks() {
+    const byId = new Map();
+    const add = (book) => {
+      if (!book || !book.id || byId.has(book.id)) return;
+      byId.set(book.id, snapshotReadingLevelBook(book));
+    };
+    state.books.forEach(add);
+    getGroups().forEach((group) => (group.books || []).forEach(add));
+    Object.values(getNotes()).forEach((note) => add(note && note.book));
+    Object.values(state.readingLevels).forEach((record) => add(record && record.book));
+    return [...byId.values()];
+  }
+
+  function gradedReadingStats(books = gradedReadingLibraryBooks()) {
+    const stats = { deep: 0, light: 0, casual: 0, unclassified: 0, total: books.length };
+    books.forEach((book) => {
+      stats[readingLevelForBook(book.id)] += 1;
+    });
+    return stats;
+  }
+
+  function gradedReadingBooks() {
+    const query = state.levelQuery.trim().toLocaleLowerCase();
+    const order = { deep: 0, light: 1, casual: 2, unclassified: 3 };
+    return gradedReadingLibraryBooks()
+      .filter((book) => {
+        const level = readingLevelForBook(book.id);
+        if (state.levelFilter !== "all" && level !== state.levelFilter) return false;
+        if (!query) return true;
+        return `${book.title || ""} ${book.author || ""}`
+          .toLocaleLowerCase()
+          .includes(query);
+      })
+      .sort((left, right) => {
+        const levelDifference =
+          order[readingLevelForBook(left.id)] - order[readingLevelForBook(right.id)];
+        return levelDifference || left.title.localeCompare(right.title, "zh-CN");
+      });
   }
 
   function normalizeTitle(value) {
@@ -2793,6 +3265,7 @@
     state.books.forEach(add);
     getGroups().forEach((group) => (group.books || []).forEach(add));
     Object.values(getNotes()).forEach((note) => add(note && note.book));
+    Object.values(state.readingLevels).forEach((record) => add(record && record.book));
     (state.obsidianCache.books || []).forEach((item) =>
       add({ title: item.matchTitle || item.sourceTitle }),
     );
@@ -2818,6 +3291,9 @@
     getGroups().forEach((group) => candidates.push(...(group.books || [])));
     Object.values(getNotes()).forEach((note) => {
       if (note && note.book) candidates.push(note.book);
+    });
+    Object.values(state.readingLevels).forEach((record) => {
+      if (record && record.book) candidates.push(record.book);
     });
     return candidates.find(
       (book) => normalizeTitle(book.title) === normalizedTitle && book.id,
@@ -3150,6 +3626,40 @@
     `;
   }
 
+  function readingLevelMenuHtml(book, groupId) {
+    const current = readingLevelForBook(book.id);
+    const levelItems = [
+      ["deep", "深度阅读"],
+      ["light", "轻度阅读"],
+      ["casual", "随便读读"],
+      ["unclassified", "清除分级"],
+    ]
+      .map(
+        ([value, label]) => `
+          <button class="wr-topic-book-menu-item" type="button" role="menuitemradio" aria-checked="${current === value}" data-wr-action="set-reading-level" data-book-id="${escapeHtml(book.id)}" data-level="${value}">
+            <span>${label}</span>
+            ${current === value ? iconSvg("check") : ""}
+          </button>`,
+      )
+      .join("");
+
+    return `
+      <div class="wr-topic-group-book-menu">
+        <button class="wr-topic-btn wr-topic-group-book-menu-button" type="button" data-wr-action="toggle-book-menu" title="书籍操作" aria-label="书籍操作" aria-haspopup="menu" aria-expanded="false">${iconSvg("moreVertical")}</button>
+        <div class="wr-topic-book-menu-popover" data-wr-book-menu role="menu" hidden>
+          <button class="wr-topic-book-menu-item" type="button" role="menuitem" data-wr-action="toggle-level-submenu" aria-haspopup="menu" aria-expanded="false">
+            <span>阅读分级</span>
+            ${iconSvg("chevronRight")}
+          </button>
+          <div class="wr-topic-level-submenu" data-wr-level-submenu role="menu" hidden>${levelItems}</div>
+          <button class="wr-topic-book-menu-item danger" type="button" role="menuitem" data-wr-action="remove-book" data-group-id="${escapeHtml(groupId)}" data-book-id="${escapeHtml(book.id)}">
+            <span>移出主题组</span>
+            ${iconSvg("trash")}
+          </button>
+        </div>
+      </div>`;
+  }
+
   function renderGroupDetail(group) {
     if (state.formMode === "new") return renderGroupForm(null);
     if (state.formMode === "edit" && group) return renderGroupForm(group);
@@ -3182,7 +3692,7 @@
                   <button class="wr-topic-group-book-title-action" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文：${escapeHtml(book.title)}">${escapeHtml(book.title)}</button>
                   <button class="wr-topic-group-book-context ${context ? "" : "is-empty"}" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文">${escapeHtml(contextLabel)}</button>
                 </div>
-                <button class="wr-topic-btn danger wr-topic-group-book-remove" type="button" data-wr-action="remove-book" data-group-id="${escapeHtml(group.id)}" data-book-id="${escapeHtml(book.id)}" title="从主题组移除" aria-label="从主题组移除">${iconSvg("trash")}</button>
+                ${readingLevelMenuHtml(book, group.id)}
               </article>
             `;
           })
@@ -3328,6 +3838,75 @@
         <div class="wr-topic-catalog-list" data-wr-catalog-list>${catalogListHtml()}</div>
       </section>
     `;
+  }
+
+  function gradedReadingListHtml() {
+    const books = gradedReadingBooks();
+    if (!books.length) {
+      return `<div class="wr-topic-empty">没有符合当前筛选条件的书籍。</div>`;
+    }
+
+    return `<div class="wr-topic-graded-grid">
+      ${books
+        .map((book) => {
+          const level = readingLevelForBook(book.id);
+          const context = getBookContextSummary(book.id);
+          return `
+            <button class="wr-topic-graded-card" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" aria-label="打开书籍阅读上下文：${escapeHtml(book.title)}">
+              ${coverMarkup(book, "wr-topic-graded-cover")}
+              <span class="wr-topic-graded-content">
+                <span class="wr-topic-graded-title" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</span>
+                ${book.author ? `<span class="wr-topic-graded-author">${escapeHtml(book.author)}</span>` : ""}
+                <span class="wr-topic-graded-context ${context ? "" : "is-empty"}">${escapeHtml(context || "暂无阅读上下文")}</span>
+                <span class="wr-topic-level-badge ${level}">${readingLevelLabel(level)}</span>
+              </span>
+            </button>`;
+        })
+        .join("")}
+    </div>`;
+  }
+
+  function renderGradedReadingView() {
+    const stats = gradedReadingStats();
+    const filters = [
+      ["all", "全部", stats.total],
+      ["deep", "深度阅读", stats.deep],
+      ["light", "轻度阅读", stats.light],
+      ["casual", "随便读读", stats.casual],
+      ["unclassified", "未分级", stats.unclassified],
+    ];
+    return `
+      <section class="wr-topic-graded">
+        <div class="wr-topic-graded-head">
+          <div>
+            <h3>分级阅读</h3>
+            <p>按今晚可用的精力，选择合适的书继续阅读。</p>
+          </div>
+        </div>
+        <div class="wr-topic-graded-stats" aria-label="阅读分级统计">
+          ${filters
+            .slice(1)
+            .map(
+              ([value, label, count]) => `
+                <button class="wr-topic-graded-stat ${state.levelFilter === value ? "active" : ""}" type="button" data-wr-action="level-filter" data-filter="${value}">
+                  <strong>${count}</strong><span>${label}</span>
+                </button>`,
+            )
+            .join("")}
+        </div>
+        <div class="wr-topic-graded-controls">
+          <input class="wr-topic-input wr-topic-graded-search" type="search" data-wr-action="filter-levels" placeholder="搜索书名或作者" value="${escapeHtml(state.levelQuery)}" autocomplete="off">
+          <div class="wr-topic-graded-filters" role="group" aria-label="筛选阅读分级">
+            ${filters
+              .map(
+                ([value, label, count]) =>
+                  `<button class="wr-topic-btn wr-topic-catalog-filter ${state.levelFilter === value ? "active" : ""}" type="button" data-wr-action="level-filter" data-filter="${value}">${label} ${count}</button>`,
+              )
+              .join("")}
+          </div>
+        </div>
+        <div class="wr-topic-graded-list" data-wr-graded-list>${gradedReadingListHtml()}</div>
+      </section>`;
   }
 
   function suggestedCloudKey() {
@@ -3489,11 +4068,14 @@
             <div class="wr-topic-tabs" role="tablist">
               <button class="wr-topic-tab ${state.panelTab === "groups" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "groups"}" data-wr-action="switch-tab" data-tab="groups">${text.groups}</button>
               <button class="wr-topic-tab ${state.panelTab === "catalog" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "catalog"}" data-wr-action="switch-tab" data-tab="catalog">${text.catalog}</button>
+              <button class="wr-topic-tab ${state.panelTab === "levels" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "levels"}" data-wr-action="switch-tab" data-tab="levels">${text.gradedReading}</button>
             </div>
           </header>
           ${
             state.panelTab === "catalog"
               ? renderCatalogView()
+              : state.panelTab === "levels"
+                ? renderGradedReadingView()
               : `<div class="wr-topic-panel-body">
                   <section class="wr-topic-sidebar">
                     <div class="wr-topic-count">${text.recognized(state.books.length)}</div>
@@ -3746,7 +4328,15 @@
             <span class="wr-topic-book-title">${escapeHtml(book.title)}</span>
             <span class="wr-topic-book-author">${escapeHtml(book.author)}</span>
           </div>
-          ${book.url ? `<button class="wr-topic-btn wr-topic-modal-reader-btn" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}">${iconSvg("bookOpen")}<span>${text.openReader}</span></button>` : ""}
+          <div class="wr-topic-modal-book-tools">
+            <label class="wr-topic-modal-level">
+              <span>阅读分级</span>
+              <select class="wr-topic-input" data-wr-reading-level-select data-book-id="${escapeHtml(book.id)}" aria-label="阅读分级">
+                ${readingLevelOptionsHtml(book.id)}
+              </select>
+            </label>
+            ${book.url ? `<button class="wr-topic-btn wr-topic-modal-reader-btn" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}">${iconSvg("bookOpen")}<span>${text.openReader}</span></button>` : ""}
+          </div>
         </div>
         <form class="wr-topic-form" data-wr-form="note" data-book-id="${escapeHtml(bookId)}" data-obsidian-authoritative="${obsidianAuthoritative ? "1" : "0"}">
           <div class="wr-topic-note-scroll">
@@ -4435,10 +5025,48 @@
     refreshShelf();
   }
 
+  function closeBookMenus(exceptRoot = null) {
+    document.querySelectorAll(".wr-topic-group-book-menu").forEach((root) => {
+      if (root === exceptRoot) return;
+      const menu = root.querySelector("[data-wr-book-menu]");
+      const submenu = root.querySelector("[data-wr-level-submenu]");
+      const menuButton = root.querySelector('[data-wr-action="toggle-book-menu"]');
+      const submenuButton = root.querySelector('[data-wr-action="toggle-level-submenu"]');
+      if (menu) menu.hidden = true;
+      if (submenu) submenu.hidden = true;
+      if (menuButton) menuButton.setAttribute("aria-expanded", "false");
+      if (submenuButton) submenuButton.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function toggleBookMenu(button) {
+    const root = button.closest(".wr-topic-group-book-menu");
+    const menu = root && root.querySelector("[data-wr-book-menu]");
+    if (!root || !menu) return;
+    const shouldOpen = menu.hidden;
+    closeBookMenus(root);
+    menu.hidden = !shouldOpen;
+    button.setAttribute("aria-expanded", String(shouldOpen));
+  }
+
+  function toggleLevelSubmenu(button) {
+    const root = button.closest(".wr-topic-group-book-menu");
+    const submenu = root && root.querySelector("[data-wr-level-submenu]");
+    if (!submenu) return;
+    const shouldOpen = submenu.hidden;
+    submenu.hidden = !shouldOpen;
+    button.setAttribute("aria-expanded", String(shouldOpen));
+  }
+
   async function onClick(event) {
     if (!isShelfEnhancementRoute()) return;
     const actionEl = event.target.closest("[data-wr-action]");
-    if (!actionEl) return;
+    if (!actionEl) {
+      closeBookMenus();
+      return;
+    }
+
+    if (!actionEl.closest(".wr-topic-group-book-menu")) closeBookMenus();
 
     const action = actionEl.dataset.wrAction;
 
@@ -4482,11 +5110,18 @@
     if (action === "refresh-shelf") refreshShelf();
     if (action === "load-full-shelf") autoLoadFullShelf();
     if (action === "switch-tab") {
-      state.panelTab = actionEl.dataset.tab === "catalog" ? "catalog" : "groups";
+      const nextTab = actionEl.dataset.tab;
+      state.panelTab = ["groups", "catalog", "levels"].includes(nextTab)
+        ? nextTab
+        : "groups";
       renderPanel();
     }
     if (action === "catalog-filter") {
       state.catalogFilter = actionEl.dataset.filter || "all";
+      renderPanel();
+    }
+    if (action === "level-filter") {
+      state.levelFilter = actionEl.dataset.filter || "all";
       renderPanel();
     }
     if (action === "refresh-catalog") {
@@ -4534,6 +5169,15 @@
       if (form) form.requestSubmit();
     }
     if (action === "delete-group") await deleteGroup(actionEl.dataset.groupId);
+    if (action === "toggle-book-menu") toggleBookMenu(actionEl);
+    if (action === "toggle-level-submenu") toggleLevelSubmenu(actionEl);
+    if (action === "set-reading-level") {
+      try {
+        await setReadingLevel(actionEl.dataset.bookId, actionEl.dataset.level);
+      } catch (error) {
+        alert(`阅读分级保存失败：${error.message}`);
+      }
+    }
     if (action === "remove-book")
       await removeBookFromGroup(
         actionEl.dataset.groupId,
@@ -4603,7 +5247,7 @@
 
   function onInput(event) {
     const actionEl = event.target.closest(
-      '[data-wr-action="filter-books"], [data-wr-action="filter-catalog"], [data-wr-action="relation-title"], [data-wr-action="graph-search"]',
+      '[data-wr-action="filter-books"], [data-wr-action="filter-catalog"], [data-wr-action="filter-levels"], [data-wr-action="relation-title"], [data-wr-action="graph-search"]',
     );
     if (!actionEl) return;
 
@@ -4623,13 +5267,27 @@
       return;
     }
 
+    if (actionEl.dataset.wrAction === "filter-levels") {
+      state.levelQuery = actionEl.value || "";
+      const list = document.querySelector("[data-wr-graded-list]");
+      if (list) list.innerHTML = gradedReadingListHtml();
+      return;
+    }
+
     state.catalogQuery = actionEl.value || "";
     const list = document.querySelector("[data-wr-catalog-list]");
     if (list) list.innerHTML = catalogListHtml();
   }
 
-  function onChange(event) {
+  async function onChange(event) {
     if (event.target.matches('[data-wr-action="graph-filter"]')) filterGraph();
+    if (event.target.matches("[data-wr-reading-level-select]")) {
+      try {
+        await setReadingLevel(event.target.dataset.bookId, event.target.value);
+      } catch (error) {
+        alert(`阅读分级保存失败：${error.message}`);
+      }
+    }
     if (event.target.matches('#wr-topic-relation-modal [name="direction"]')) {
       const form = event.target.closest('[data-wr-form="relation"]');
       if (form) activateExistingRelation(form);
