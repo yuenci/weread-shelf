@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.4.0
+// @version      0.4.1
 // @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -110,7 +110,6 @@
     openReader: "进入阅读",
     bookNoteTitle: "书籍阅读上下文",
     whyRead: "我为什么读这本书？它在我的思想地图里承担什么角色？",
-    status: "阅读状态 / 动机",
     question: "阅读问题",
     lineage: "阅读脉络",
     nextStop: "下一站",
@@ -328,7 +327,7 @@
   function hasReadingContext(note) {
     return Boolean(
       note &&
-        ["note", "status", "question"].some((field) =>
+        ["note", "question"].some((field) =>
           String(note[field] || "").trim(),
         ),
     );
@@ -569,7 +568,6 @@
       note: obsidianAuthoritative
         ? String(existing.note || "")
         : String(values.note || "").trim(),
-      status: String(values.status || "").trim(),
       question: obsidianAuthoritative
         ? String(existing.question || "")
         : String(values.question || "").trim(),
@@ -2029,6 +2027,10 @@
         overflow-y: auto;
         padding: 2px 6px 14px 0;
         scrollbar-width: thin;
+      }
+
+      .wr-topic-relation-slot {
+        display: contents;
       }
 
       .wr-topic-relation-section h4 {
@@ -3567,12 +3569,17 @@
 
   function relationSectionHtml(book, direction) {
     const relations = relationsForBook(book)[direction];
+    if (!relations.length) return "";
     const title = direction === "incoming" ? text.lineage : text.nextStop;
     return `
-      <section class="wr-topic-relation-section" data-wr-relation-section="${direction}" ${relations.length ? "" : "hidden"}>
+      <section class="wr-topic-relation-section">
         <h4>${title}</h4>
         <div class="wr-topic-relation-list" data-wr-relation-list="${direction}">${relationCardsHtml(relations, direction)}</div>
       </section>`;
+  }
+
+  function relationSlotHtml(book, direction) {
+    return `<div class="wr-topic-relation-slot" data-wr-relation-slot="${direction}">${relationSectionHtml(book, direction)}</div>`;
   }
 
   function snapshotNoteDraft() {
@@ -3580,7 +3587,6 @@
     if (!form) return;
     state.noteDrafts[form.dataset.bookId] = {
       note: form.elements.note.value,
-      status: form.elements.status.value,
       question: form.elements.question.value,
     };
   }
@@ -3589,7 +3595,7 @@
     const book = findBook(bookId);
     if (!book) return "";
     const notes = getNotes();
-    const note = notes[bookId] || { note: "", status: "", question: "" };
+    const note = notes[bookId] || { note: "", question: "" };
     const draft = state.noteDrafts[bookId] || {};
     const obsidian = getObsidianContext(bookId);
     const obsidianAuthoritative = hasObsidianReadingContext(obsidian);
@@ -3603,10 +3609,6 @@
       : Object.prototype.hasOwnProperty.call(draft, "question")
         ? draft.question
         : note.question;
-    const statusValue = Object.prototype.hasOwnProperty.call(draft, "status")
-      ? draft.status
-      : note.status;
-
     return `
       <div class="wr-topic-modal-card wr-topic-note-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(text.bookNoteTitle)}">
         <div class="wr-topic-modal-head">
@@ -3625,21 +3627,17 @@
         </div>
         <form class="wr-topic-form" data-wr-form="note" data-book-id="${escapeHtml(bookId)}" data-obsidian-authoritative="${obsidianAuthoritative ? "1" : "0"}">
           <div class="wr-topic-note-scroll">
-            ${relationSectionHtml(book, "incoming")}
+            ${relationSlotHtml(book, "incoming")}
             ${obsidianAuthoritative ? `<p class="wr-topic-source-note">阅读上下文和阅读问题来自 Obsidian，只读展示。原有本地内容仍被保留。</p>` : ""}
             <div class="wr-topic-field">
               <label for="wr-note-main">${text.whyRead}</label>
               <textarea id="wr-note-main" class="wr-topic-textarea" name="note" ${obsidianAuthoritative ? "readonly" : ""}>${escapeHtml(contextValue || "")}</textarea>
             </div>
             <div class="wr-topic-field">
-              <label for="wr-note-status">${text.status}</label>
-              <input id="wr-note-status" class="wr-topic-input" name="status" value="${escapeHtml(statusValue || "")}">
-            </div>
-            <div class="wr-topic-field">
               <label for="wr-note-question">${text.question}</label>
               <textarea id="wr-note-question" class="wr-topic-textarea" name="question" ${obsidianAuthoritative ? "readonly" : ""}>${escapeHtml(questionValue || "")}</textarea>
             </div>
-            ${relationSectionHtml(book, "outgoing")}
+            ${relationSlotHtml(book, "outgoing")}
           </div>
           <div class="wr-topic-modal-actions wr-topic-note-actions">
             <div>
@@ -3673,14 +3671,10 @@
     const book = findBook(bookId);
     if (!form || !book || form.dataset.bookId !== bookId) return;
     for (const direction of ["incoming", "outgoing"]) {
-      const section = document.querySelector(
-        `#wr-topic-note-modal [data-wr-relation-section="${direction}"]`,
+      const slot = document.querySelector(
+        `#wr-topic-note-modal [data-wr-relation-slot="${direction}"]`,
       );
-      if (!section) continue;
-      const relations = relationsForBook(book)[direction];
-      section.hidden = !relations.length;
-      const list = section.querySelector(`[data-wr-relation-list="${direction}"]`);
-      if (list) list.innerHTML = relationCardsHtml(relations, direction);
+      if (slot) slot.innerHTML = relationSectionHtml(book, direction);
     }
   }
 
@@ -4244,7 +4238,6 @@
       book,
       {
         note: form.elements.note.value,
-        status: form.elements.status.value,
         question: form.elements.question.value,
       },
       obsidianAuthoritative,
@@ -4252,7 +4245,6 @@
 
     if (
       !notes[bookId].note &&
-      !notes[bookId].status &&
       !notes[bookId].question
     ) {
       markDeleted("notes", bookId, notes[bookId].updatedAt);
