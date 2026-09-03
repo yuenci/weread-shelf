@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.5.0
-// @description  Add topic groups, reading context notes, and optional Cloudflare KV sync to WeRead shelf.
+// @version      0.6.0
+// @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
 // @updateURL    https://github.com/yuenci/weread-shelf/raw/refs/heads/master/weread-local-topic-shelf.user.js
@@ -20,6 +20,7 @@
     notes: "weread_local_book_context_notes_v1",
     relations: "weread_local_reading_relations_v1",
     readingLevels: "weread_local_reading_levels_v1",
+    libraryBooks: "weread_local_library_books_v1",
     cloudConfig: "weread_cloud_sync_config_v1",
     syncMeta: "weread_cloud_sync_meta_v1",
     obsidianCache: "weread_obsidian_catalog_cache_v1",
@@ -40,6 +41,7 @@
 
   const state = {
     books: [],
+    libraryBooks: {},
     groups: [],
     notes: {},
     relations: [],
@@ -74,6 +76,10 @@
     catalogQuery: "",
     levelFilter: "all",
     levelQuery: "",
+    libraryFilter: "all",
+    libraryQuery: "",
+    editingBookId: "",
+    bookModalReturn: null,
     catalogLoading: false,
     obsidianCache: {
       books: [],
@@ -133,6 +139,7 @@
     cloudSettingsTitle: "Cloudflare KV 云同步",
     catalog: "书目匹配",
     gradedReading: "分级阅读",
+    bookManagement: "书籍管理",
   };
 
   const DB_NAME = "weread_local_topic_shelf_db";
@@ -165,6 +172,7 @@
         notes: {},
         relations: {},
         levels: {},
+        books: {},
       },
     };
   }
@@ -229,6 +237,7 @@
     let notes = await dbGet(STORE.notes, null);
     let relations = await dbGet(STORE.relations, null);
     let readingLevels = await dbGet(STORE.readingLevels, null);
+    let libraryBooks = await dbGet(STORE.libraryBooks, null);
     const cloudConfig = await dbGet(STORE.cloudConfig, null);
     const syncMeta = await dbGet(STORE.syncMeta, null);
     const obsidianCache = await dbGet(STORE.obsidianCache, null);
@@ -261,6 +270,10 @@
     state.readingLevels =
       readingLevels && typeof readingLevels === "object" && !Array.isArray(readingLevels)
         ? readingLevels
+        : {};
+    state.libraryBooks =
+      libraryBooks && typeof libraryBooks === "object" && !Array.isArray(libraryBooks)
+        ? libraryBooks
         : {};
     state.cloudConfig = {
       ...state.cloudConfig,
@@ -298,6 +311,13 @@
           typeof syncMeta.tombstones.levels === "object"
             ? syncMeta.tombstones.levels
             : {},
+        books:
+          syncMeta &&
+          syncMeta.tombstones &&
+          syncMeta.tombstones.books &&
+          typeof syncMeta.tombstones.books === "object"
+            ? syncMeta.tombstones.books
+            : {},
       },
     };
     state.obsidianCache = {
@@ -308,7 +328,21 @@
       cached: Boolean(obsidianCache),
     };
 
-    if (!syncMeta) await dbSet(STORE.syncMeta, state.syncMeta);
+    const migrated = await migrateLibraryState();
+    if (libraryBooks === null || migrated) {
+      await Promise.all([
+        dbSet(STORE.libraryBooks, state.libraryBooks),
+        dbSet(STORE.groups, state.groups),
+        dbSet(STORE.notes, state.notes),
+        dbSet(STORE.relations, state.relations),
+        dbSet(STORE.readingLevels, state.readingLevels),
+      ]);
+      state.syncMeta.dirty = true;
+      state.syncMeta.localUpdatedAt = nowIso();
+    }
+    if (!syncMeta || libraryBooks === null || migrated) {
+      await dbSet(STORE.syncMeta, state.syncMeta);
+    }
     updateSyncStatus(
       isCloudConfigured() ? "等待同步" : "未配置",
       isCloudConfigured() ? "pending" : "idle",
@@ -376,6 +410,12 @@
     await markLocalChange();
   }
 
+  async function saveLibraryBooks(libraryBooks) {
+    state.libraryBooks = libraryBooks;
+    await dbSet(STORE.libraryBooks, libraryBooks);
+    await markLocalChange();
+  }
+
   function isCloudConfigured(config = state.cloudConfig) {
     return Boolean(
       config &&
@@ -435,6 +475,7 @@
         notes: {},
         relations: {},
         levels: {},
+        books: {},
       };
     }
     if (!state.syncMeta.tombstones[type]) {
@@ -460,6 +501,10 @@
       levels:
         value && value.levels && typeof value.levels === "object"
           ? value.levels
+          : {},
+      books:
+        value && value.books && typeof value.books === "object"
+          ? value.books
           : {},
     };
   }
@@ -536,6 +581,14 @@
   }
 
   async function applyWereadSyncResponse(payload) {
+    const before = JSON.stringify({
+      groups: state.groups,
+      notes: state.notes,
+      relations: state.relations,
+      levels: state.readingLevels,
+      books: state.libraryBooks,
+      tombstones: state.syncMeta.tombstones,
+    });
     const nextGroups = Array.isArray(payload.groups) ? payload.groups : [];
     const nextNotes =
       payload.notes && typeof payload.notes === "object" ? payload.notes : {};
@@ -546,6 +599,10 @@
       payload.levels && typeof payload.levels === "object" && !Array.isArray(payload.levels)
         ? payload.levels
         : state.readingLevels;
+    const nextLibraryBooks =
+      payload.books && typeof payload.books === "object" && !Array.isArray(payload.books)
+        ? payload.books
+        : state.libraryBooks;
     const nextTombstones = normalizeTombstones(payload.tombstones);
     if (
       !Array.isArray(payload.relations) &&
@@ -559,30 +616,49 @@
     ) {
       nextTombstones.levels = state.syncMeta.tombstones.levels || {};
     }
-    const changed =
-      JSON.stringify(state.groups) !== JSON.stringify(nextGroups) ||
-      JSON.stringify(state.notes) !== JSON.stringify(nextNotes) ||
-      JSON.stringify(state.relations) !== JSON.stringify(nextRelations) ||
-      JSON.stringify(state.readingLevels) !== JSON.stringify(nextReadingLevels) ||
-      JSON.stringify(state.syncMeta.tombstones) !==
-        JSON.stringify(nextTombstones);
+    if (
+      (!payload.books || typeof payload.books !== "object" || Array.isArray(payload.books)) &&
+      (!payload.tombstones || !payload.tombstones.books)
+    ) {
+      nextTombstones.books = state.syncMeta.tombstones.books || {};
+    }
+    const remoteRelations = JSON.stringify(nextRelations);
+    const remoteBooks = JSON.stringify(nextLibraryBooks);
+    const remoteTombstones = JSON.stringify(nextTombstones);
 
     state.groups = nextGroups;
     state.notes = nextNotes;
     state.relations = nextRelations;
     state.readingLevels = nextReadingLevels;
+    state.libraryBooks = nextLibraryBooks;
     state.syncMeta.tombstones = nextTombstones;
-    if (!changed) return;
+    await migrateLibraryState();
+    const migrationNeedsPush =
+      JSON.stringify(state.relations) !== remoteRelations ||
+      JSON.stringify(state.libraryBooks) !== remoteBooks ||
+      JSON.stringify(state.syncMeta.tombstones) !== remoteTombstones;
+    const changed =
+      before !==
+      JSON.stringify({
+        groups: state.groups,
+        notes: state.notes,
+        relations: state.relations,
+        levels: state.readingLevels,
+        books: state.libraryBooks,
+        tombstones: state.syncMeta.tombstones,
+      });
+    if (!changed) return { changed: false, migrationNeedsPush };
 
     await Promise.all([
-      dbSet(STORE.groups, nextGroups),
-      dbSet(STORE.notes, nextNotes),
-      dbSet(STORE.relations, nextRelations),
-      dbSet(STORE.readingLevels, nextReadingLevels),
+      dbSet(STORE.groups, state.groups),
+      dbSet(STORE.notes, state.notes),
+      dbSet(STORE.relations, state.relations),
+      dbSet(STORE.readingLevels, state.readingLevels),
+      dbSet(STORE.libraryBooks, state.libraryBooks),
     ]);
     if (!isShelfEnhancementRoute()) {
       deactivateShelfEnhancements();
-      return;
+      return { changed: true, migrationNeedsPush };
     }
     if (!state.formMode && !document.getElementById("wr-topic-note-modal")) {
       refreshShelf();
@@ -591,6 +667,7 @@
       applyHiddenBooks();
       renderBookNoteIcons();
     }
+    return { changed: true, migrationNeedsPush };
   }
 
   function getObsidianContext(bookId) {
@@ -612,8 +689,16 @@
     );
   }
 
+  function groupBooks(group) {
+    if (!group) return [];
+    if (Array.isArray(group.bookIds)) {
+      return group.bookIds.map((id) => findBook(id)).filter(Boolean);
+    }
+    return Array.isArray(group.books) ? group.books : [];
+  }
+
   function groupContextProgress(group) {
-    const books = Array.isArray(group && group.books) ? group.books : [];
+    const books = groupBooks(group);
     return {
       completed: books.filter((book) => bookHasReadingContext(book.id)).length,
       total: books.length,
@@ -661,7 +746,7 @@
       const path = `/api/v2/libraries/${encodeURIComponent(config.key)}/obsidian/resolve`;
       const result = await cloudApiRequest("POST", config, path, {
         schemaVersion: CLOUD_SCHEMA_VERSION,
-        shelfBooks: state.books.map((book) => ({ id: book.id, title: book.title })),
+        libraryBooks: libraryBookList().map((book) => ({ id: book.id, title: book.title })),
       });
       state.obsidianCache = {
         books: Array.isArray(result.body.books) ? result.body.books : [],
@@ -694,13 +779,20 @@
     const result = await cloudApiRequest("POST", config, path, {
       schemaVersion: CLOUD_SCHEMA_VERSION,
       deviceId: state.syncMeta.deviceId,
-      groups: state.groups,
+      groups: state.groups.map((group) => ({
+        ...group,
+        books: groupBooks(group).map(legacyBookSnapshot).filter(Boolean),
+      })),
       notes: state.notes,
       relations: state.relations,
       levels: state.readingLevels,
+      books: state.libraryBooks,
       tombstones: state.syncMeta.tombstones,
     });
-    await applyWereadSyncResponse(result.body);
+    const applied = await applyWereadSyncResponse(result.body);
+    if (applied && applied.migrationNeedsPush) {
+      state.syncMeta.localUpdatedAt = nowIso();
+    }
 
     try {
       await resolveObsidianCatalog({ render: false });
@@ -2765,6 +2857,201 @@
         text-align: center;
       }
 
+      .wr-topic-field-heading,
+      .wr-topic-library-head,
+      .wr-topic-library-controls,
+      .wr-topic-library-card-actions,
+      .wr-topic-link-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .wr-topic-field-heading,
+      .wr-topic-library-head {
+        justify-content: space-between;
+      }
+
+      .wr-topic-text-action {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        border: 0;
+        background: transparent;
+        color: var(--wr-topic-muted);
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .wr-topic-text-action:hover,
+      .wr-topic-text-action:focus-visible {
+        color: var(--wr-topic-blue);
+      }
+
+      .wr-topic-text-action .wr-topic-icon {
+        width: 14px;
+        height: 14px;
+      }
+
+      .wr-topic-library {
+        display: flex;
+        min-height: 0;
+        flex: 1;
+        flex-direction: column;
+        gap: 14px;
+        padding: 20px 24px;
+        overflow: hidden;
+      }
+
+      .wr-topic-library-head h3,
+      .wr-topic-library-head p {
+        margin: 0;
+      }
+
+      .wr-topic-library-head p {
+        margin-top: 4px;
+        font-size: 12px;
+      }
+
+      .wr-topic-library-controls {
+        flex-wrap: wrap;
+      }
+
+      .wr-topic-library-search {
+        min-width: 220px;
+        flex: 1;
+      }
+
+      .wr-topic-library-list {
+        min-height: 0;
+        flex: 1;
+        overflow-y: auto;
+        scrollbar-width: thin;
+      }
+
+      .wr-topic-library-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .wr-topic-library-card {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        min-height: 104px;
+        padding: 10px;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 6px;
+        background: #fff;
+      }
+
+      .wr-topic-library-main {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: 64px minmax(0, 1fr);
+        gap: 10px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .wr-topic-library-cover {
+        width: 64px;
+        height: 84px;
+        object-fit: cover;
+        border-radius: 3px;
+      }
+
+      .wr-topic-library-content {
+        min-width: 0;
+      }
+
+      .wr-topic-library-title {
+        display: block;
+        color: var(--wr-topic-text);
+        font-size: 13px;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+
+      .wr-topic-library-meta,
+      .wr-topic-library-context {
+        display: -webkit-box;
+        margin-top: 5px;
+        color: var(--wr-topic-muted);
+        font-size: 11px;
+        line-height: 1.45;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+      }
+
+      .wr-topic-library-card-actions {
+        align-self: start;
+      }
+
+      .wr-topic-link-banner {
+        padding: 10px 12px;
+        border: 1px solid #bfdbfe;
+        border-radius: 6px;
+        background: #eff6ff;
+        color: #1e3a5f;
+        font-size: 12px;
+      }
+
+      .wr-topic-book-editor {
+        width: min(560px, calc(100vw - 32px));
+      }
+
+      .wr-topic-book-editor-form {
+        display: grid;
+        gap: 12px;
+      }
+
+      .wr-topic-link-editor {
+        width: min(680px, calc(100vw - 32px));
+      }
+
+      .wr-topic-link-compare {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin: 12px 0;
+      }
+
+      .wr-topic-link-book {
+        padding: 10px;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 6px;
+      }
+
+      .wr-topic-relation-candidates {
+        display: grid;
+        gap: 4px;
+        margin-top: 6px;
+      }
+
+      .wr-topic-relation-candidate {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 5px;
+        background: #fff;
+        color: var(--wr-topic-text);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .wr-topic-relation-candidate:hover {
+        border-color: var(--wr-topic-blue);
+      }
+
       @media (max-width: 840px) {
         .wr-topic-nested-modal {
           padding: 12px;
@@ -2844,6 +3131,11 @@
         }
 
         .wr-topic-graded-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .wr-topic-library-grid,
+        .wr-topic-link-compare {
           grid-template-columns: 1fr;
         }
 
@@ -3038,20 +3330,54 @@
     return books;
   }
 
+  async function reconcileShelfBooks() {
+    const next = { ...state.libraryBooks };
+    let changed = false;
+    const timestamp = nowIso();
+    state.books.forEach((shelfBook) => {
+      const existing =
+        Object.values(next).find((book) => book.wereadBookId === shelfBook.id) ||
+        next[shelfBook.id];
+      const id = existing ? existing.id : shelfBook.id;
+      const normalized = normalizeLibraryBook(
+        {
+          ...(existing || {}),
+          id,
+          title: shelfBook.title || (existing && existing.title),
+          author: shelfBook.author || (existing && existing.author),
+          coverUrl: shelfBook.cover || (existing && existing.coverUrl),
+          readerUrl: shelfBook.url || (existing && existing.readerUrl),
+          source: "weread",
+          wereadBookId: shelfBook.id,
+          createdAt: (existing && existing.createdAt) || timestamp,
+          updatedAt: timestamp,
+        },
+        id,
+        "weread",
+      );
+      const comparableExisting = existing
+        ? { ...existing, updatedAt: normalized.updatedAt }
+        : null;
+      if (!comparableExisting || JSON.stringify(comparableExisting) !== JSON.stringify(normalized)) {
+        next[id] = normalized;
+        delete state.syncMeta.tombstones.books[id];
+        changed = true;
+      }
+    });
+    if (!changed) return false;
+    await saveLibraryBooks(next);
+    return true;
+  }
+
   function findBook(bookId) {
+    const direct = getLibraryBook(bookId);
+    if (direct) return libraryBookView(direct);
+    const linked = Object.values(state.libraryBooks).find(
+      (book) => book.wereadBookId === bookId,
+    );
+    if (linked) return libraryBookView(linked);
     const fromShelf = state.books.find((book) => book.id === bookId);
-    if (fromShelf) return fromShelf;
-
-    for (const group of getGroups()) {
-      const fromGroup = (group.books || []).find((book) => book.id === bookId);
-      if (fromGroup) return fromGroup;
-    }
-
-    const note = getNotes()[bookId];
-    if (note && note.book) return note.book;
-
-    const levelRecord = state.readingLevels[bookId];
-    return levelRecord && levelRecord.book ? levelRecord.book : null;
+    return fromShelf || null;
   }
 
   function readingLevelLabel(level) {
@@ -3123,15 +3449,13 @@
   }
 
   function gradedReadingLibraryBooks() {
+    const library = libraryBookList();
+    if (library.length) return library;
     const byId = new Map();
-    const add = (book) => {
-      if (!book || !book.id || byId.has(book.id)) return;
-      byId.set(book.id, snapshotReadingLevelBook(book));
-    };
-    state.books.forEach(add);
-    getGroups().forEach((group) => (group.books || []).forEach(add));
-    Object.values(getNotes()).forEach((note) => add(note && note.book));
-    Object.values(state.readingLevels).forEach((record) => add(record && record.book));
+    state.books.forEach((book) => byId.set(book.id, book));
+    Object.values(getNotes()).forEach((note) => {
+      if (note && note.book && !byId.has(note.book.id)) byId.set(note.book.id, note.book);
+    });
     return [...byId.values()];
   }
 
@@ -3168,6 +3492,74 @@
       .trim()
       .replace(/\s+/g, " ")
       .toLocaleLowerCase("en-US");
+  }
+
+  function libraryBookView(book) {
+    if (!book) return null;
+    return {
+      ...book,
+      id: String(book.id || ""),
+      title: String(book.title || ""),
+      author: String(book.author || ""),
+      cover: String(book.coverUrl || book.cover || ""),
+      url: String(book.readerUrl || book.detailUrl || book.url || ""),
+    };
+  }
+
+  function readerUrlForBook(book) {
+    if (!book) return "";
+    return Object.prototype.hasOwnProperty.call(book, "readerUrl")
+      ? String(book.readerUrl || "")
+      : String(book.url || "");
+  }
+
+  function normalizeLibraryBook(book, fallbackId = "", fallbackSource = "manual") {
+    if (!book || typeof book !== "object") return null;
+    const id = String(book.id || book.bookId || fallbackId || "").trim();
+    const title = String(book.title || "").trim();
+    if (!id || !title) return null;
+    const timestamp = String(book.updatedAt || book.createdAt || nowIso());
+    const legacyUrl = String(book.url || "");
+    const wereadBookId = String(
+      book.wereadBookId ||
+        (fallbackSource === "weread" || /weread\.qq\.com\/web\/reader\//.test(legacyUrl)
+          ? id
+          : ""),
+    );
+    return {
+      id,
+      title,
+      normalizedTitle: normalizeTitle(title),
+      author: String(book.author || "").trim(),
+      coverUrl: String(book.coverUrl || book.cover || ""),
+      detailUrl: String(book.detailUrl || ""),
+      readerUrl: String(book.readerUrl || legacyUrl || ""),
+      source: book.source === "weread" || wereadBookId ? "weread" : "manual",
+      wereadBookId,
+      ignoredWereadBookIds: Array.isArray(book.ignoredWereadBookIds)
+        ? [...new Set(book.ignoredWereadBookIds.map(String).filter(Boolean))]
+        : [],
+      createdAt: String(book.createdAt || timestamp),
+      updatedAt: timestamp,
+    };
+  }
+
+  function libraryBookList() {
+    return Object.values(state.libraryBooks)
+      .map((book) => libraryBookView(book))
+      .filter(Boolean)
+      .sort((left, right) => left.title.localeCompare(right.title, "zh-CN"));
+  }
+
+  function getLibraryBook(bookId) {
+    return state.libraryBooks[String(bookId || "")] || null;
+  }
+
+  function legacyBookSnapshot(book) {
+    const view = libraryBookView(book);
+    return view
+      ? { id: view.id, title: view.title, author: view.author, url: view.url, cover: view.cover }
+      : null;
   }
 
   async function sha256Hex(value) {
@@ -3242,6 +3634,154 @@
     return h.map((word) => word.toString(16).padStart(8, "0")).join("");
   }
 
+  async function relationIdForBookIds(fromBookId, toBookId) {
+    return `rel_${await sha256Hex(`${fromBookId}\u0000${toBookId}`)}`;
+  }
+
+  async function relationRefForLibraryBook(book) {
+    const view = libraryBookView(book);
+    return {
+      nodeId: `book_${await sha256Hex(view.id)}`,
+      bookId: view.id,
+      title: view.title,
+      normalizedTitle: normalizeTitle(view.title),
+      detailUrl: String(view.detailUrl || view.readerUrl || ""),
+      coverUrl: String(view.coverUrl || ""),
+    };
+  }
+
+  async function migrateLibraryState() {
+    const before = JSON.stringify({
+      books: state.libraryBooks,
+      groups: state.groups,
+      notes: state.notes,
+      relations: state.relations,
+      levels: state.readingLevels,
+    });
+    const books = {};
+    Object.entries(state.libraryBooks || {}).forEach(([id, book]) => {
+      const normalized = normalizeLibraryBook(book, id, book && book.source);
+      if (normalized) books[normalized.id] = normalized;
+    });
+
+    const register = (candidate, fallbackId = "", source = "manual") => {
+      const normalized = normalizeLibraryBook(candidate, fallbackId, source);
+      if (!normalized) return null;
+      const existing = books[normalized.id];
+      books[normalized.id] = existing
+        ? {
+            ...normalized,
+            ...existing,
+            title: existing.title || normalized.title,
+            normalizedTitle: normalizeTitle(existing.title || normalized.title),
+            author: existing.author || normalized.author,
+            coverUrl: existing.coverUrl || normalized.coverUrl,
+            detailUrl: existing.detailUrl || normalized.detailUrl,
+            readerUrl: existing.readerUrl || normalized.readerUrl,
+            wereadBookId: existing.wereadBookId || normalized.wereadBookId,
+            ignoredWereadBookIds: [
+              ...new Set([
+                ...(existing.ignoredWereadBookIds || []),
+                ...(normalized.ignoredWereadBookIds || []),
+              ]),
+            ],
+          }
+        : normalized;
+      return books[normalized.id];
+    };
+
+    state.groups.forEach((group) => {
+      (Array.isArray(group.books) ? group.books : []).forEach((book) =>
+        register(book, book && book.id, "weread"),
+      );
+    });
+    Object.values(state.notes || {}).forEach((note) => {
+      if (note && note.book) register(note.book, note.book.id, "weread");
+    });
+    Object.values(state.readingLevels || {}).forEach((record) => {
+      if (record && record.book) register(record.book, record.book.id, "weread");
+    });
+
+    const relationBookId = async (ref) => {
+      if (ref && ref.bookId) {
+        const registered = register(ref, ref.bookId, "weread");
+        if (registered) return registered.id;
+      }
+      const title = String((ref && ref.title) || "").trim();
+      const matches = Object.values(books).filter(
+        (book) => book.normalizedTitle === normalizeTitle(title),
+      );
+      if (matches.length === 1) return matches[0].id;
+      const seed = String((ref && ref.nodeId) || normalizeTitle(title));
+      const id = `local_legacy_${(await sha256Hex(seed)).slice(0, 32)}`;
+      const registered = register(
+        {
+          id,
+          title,
+          detailUrl: String((ref && ref.detailUrl) || ""),
+          coverUrl: String((ref && ref.coverUrl) || ""),
+          source: "manual",
+        },
+        id,
+        "manual",
+      );
+      return registered ? registered.id : "";
+    };
+
+    const migratedRelations = new Map();
+    for (const relation of state.relations || []) {
+      const fromBookId = relation.fromBookId || (await relationBookId(relation.from));
+      const toBookId = relation.toBookId || (await relationBookId(relation.to));
+      if (!fromBookId || !toBookId || fromBookId === toBookId) continue;
+      const fromBook = books[fromBookId] || register(relation.from, fromBookId, "manual");
+      const toBook = books[toBookId] || register(relation.to, toBookId, "manual");
+      const id = await relationIdForBookIds(fromBookId, toBookId);
+      const migrated = {
+        ...relation,
+        id,
+        fromBookId,
+        toBookId,
+        from: await relationRefForLibraryBook(fromBook),
+        to: await relationRefForLibraryBook(toBook),
+      };
+      const existing = migratedRelations.get(id);
+      if (!existing || timestampValue(migrated.updatedAt) >= timestampValue(existing.updatedAt)) {
+        migratedRelations.set(id, migrated);
+      }
+      if (relation.id && relation.id !== id) markDeleted("relations", relation.id, migrated.updatedAt);
+    }
+
+    state.libraryBooks = books;
+    state.groups = state.groups.map((group) => {
+      const bookIds = Array.isArray(group.bookIds)
+        ? group.bookIds.filter((id) => books[id])
+        : (group.books || []).map((book) => String(book.id || "")).filter((id) => books[id]);
+      const migrated = { ...group, bookIds: [...new Set(bookIds)] };
+      delete migrated.books;
+      return migrated;
+    });
+    state.relations = [...migratedRelations.values()];
+
+    Object.entries(state.notes || {}).forEach(([id, note]) => {
+      if (!books[id] && note && note.book) register(note.book, id, "weread");
+      if (note && note.book && books[id]) note.book = legacyBookSnapshot(books[id]);
+    });
+    Object.entries(state.readingLevels || {}).forEach(([id, record]) => {
+      if (!books[id] && record && record.book) register(record.book, id, "weread");
+      if (record && record.book && books[id]) record.book = legacyBookSnapshot(books[id]);
+    });
+    state.libraryBooks = books;
+
+    return before !==
+      JSON.stringify({
+        books: state.libraryBooks,
+        groups: state.groups,
+        notes: state.notes,
+        relations: state.relations,
+        levels: state.readingLevels,
+      });
+  }
+
   async function nodeIdForTitle(title) {
     return `book_${await sha256Hex(normalizeTitle(title))}`;
   }
@@ -3262,8 +3802,7 @@
         cover: String(book.cover || book.coverUrl || ""),
       });
     };
-    state.books.forEach(add);
-    getGroups().forEach((group) => (group.books || []).forEach(add));
+    libraryBookList().forEach(add);
     Object.values(getNotes()).forEach((note) => add(note && note.book));
     Object.values(state.readingLevels).forEach((record) => add(record && record.book));
     (state.obsidianCache.books || []).forEach((item) =>
@@ -3287,8 +3826,7 @@
   }
 
   function findBookByNormalizedTitle(normalizedTitle) {
-    const candidates = [...state.books];
-    getGroups().forEach((group) => candidates.push(...(group.books || [])));
+    const candidates = libraryBookList();
     Object.values(getNotes()).forEach((note) => {
       if (note && note.book) candidates.push(note.book);
     });
@@ -3314,26 +3852,23 @@
   }
 
   async function createRelationRef(book) {
-    const title = String(book.title || "").trim();
-    const normalizedTitle = normalizeTitle(title);
-    return {
-      nodeId: await nodeIdForTitle(title),
-      bookId: String(book.id || book.bookId || ""),
-      title,
-      normalizedTitle,
-      detailUrl: String(book.url || book.detailUrl || ""),
-      coverUrl: String(book.cover || book.coverUrl || ""),
-    };
+    const stored = getLibraryBook(book && (book.id || book.bookId));
+    return relationRefForLibraryBook(stored || normalizeLibraryBook(book, book.id, book.source));
   }
 
   function relationsForBook(book) {
+    const bookId = String((book && book.id) || "");
     const normalized = normalizeTitle(book && book.title);
     return {
       incoming: state.relations.filter(
-        (relation) => relation.to.normalizedTitle === normalized,
+        (relation) =>
+          (bookId && (relation.toBookId === bookId || relation.to.bookId === bookId)) ||
+          (!bookId && relation.to.normalizedTitle === normalized),
       ),
       outgoing: state.relations.filter(
-        (relation) => relation.from.normalizedTitle === normalized,
+        (relation) =>
+          (bookId && (relation.fromBookId === bookId || relation.from.bookId === bookId)) ||
+          (!bookId && relation.from.normalizedTitle === normalized),
       ),
     };
   }
@@ -3391,7 +3926,7 @@
 
       const cover = document.createElement("div");
       cover.className = "wr-topic-folder-cover";
-      (group.books || []).slice(0, 4).forEach((book) => {
+      groupBooks(group).slice(0, 4).forEach((book) => {
         if (book.cover) {
           const img = document.createElement("img");
           img.className = "wr-topic-mini-cover";
@@ -3422,7 +3957,7 @@
   function groupedBookIds() {
     const ids = new Set();
     getGroups().forEach((group) => {
-      (group.books || []).forEach((book) => ids.add(book.id));
+      groupBooks(group).forEach((book) => ids.add(book.wereadBookId || book.id));
     });
     return ids;
   }
@@ -3445,7 +3980,8 @@
     const notes = getNotes();
 
     document.querySelectorAll(SELECTORS.shelfBook).forEach((link) => {
-      const book = extractBook(link);
+      const shelfBook = extractBook(link);
+      const book = findBook(shelfBook.id) || shelfBook;
       if (!book.id) return;
       const hasContext =
         hasObsidianReadingContext(getObsidianContext(book.id)) ||
@@ -3502,6 +4038,8 @@
       "wr-topic-cloud-modal",
       "wr-topic-relation-modal",
       "wr-topic-graph-modal",
+      "wr-topic-book-editor-modal",
+      "wr-topic-book-link-modal",
       "wr-local-topic-style",
     ].forEach((id) => document.getElementById(id)?.remove());
 
@@ -3524,6 +4062,17 @@
     applyHiddenBooks();
     renderBookNoteIcons();
     renderPanel();
+    reconcileShelfBooks()
+      .then((changed) => {
+        if (!changed) return;
+        renderShelfGroups();
+        applyHiddenBooks();
+        renderBookNoteIcons();
+        renderPanel();
+      })
+      .catch((error) => {
+        console.warn("[WeRead Local Topic Shelf] shelf import failed:", error);
+      });
   }
 
   function getShelfSignature() {
@@ -3535,14 +4084,15 @@
   function bookPickerHtml() {
     const selected = state.selectedBookIds;
     const query = state.bookFilter.trim().toLowerCase();
+    const library = libraryBookList();
     const books = query
-      ? state.books.filter((book) =>
+      ? library.filter((book) =>
           `${book.title || ""} ${book.author || ""}`.toLowerCase().includes(query),
         )
-      : state.books;
+      : library;
 
-    if (!state.books.length) {
-      return `<div class="wr-topic-empty">${text.loading}</div>`;
+    if (!library.length) {
+      return `<div class="wr-topic-empty">本地书库还没有书籍。</div>`;
     }
 
     if (!books.length) {
@@ -3559,10 +4109,10 @@
           .map(
             (book) => `
           <button class="wr-topic-book-option ${selected.has(book.id) ? "selected" : ""}" type="button" data-wr-action="toggle-book" data-book-id="${escapeHtml(book.id)}">
-            <img class="wr-topic-book-cover" src="${escapeHtml(book.cover)}" alt="">
+            ${coverMarkup(book, "wr-topic-book-cover")}
             <span class="wr-topic-book-info">
               <span class="wr-topic-book-title" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</span>
-              <span class="wr-topic-book-author">${escapeHtml(book.author)}</span>
+              <span class="wr-topic-book-author">${escapeHtml(book.author || (book.source === "manual" ? "外部书" : "微信读书"))}</span>
             </span>
           </button>
         `,
@@ -3587,7 +4137,7 @@
             <textarea id="wr-topic-desc" class="wr-topic-textarea" name="description">${escapeHtml(group ? group.description : "")}</textarea>
           </div>
           <div class="wr-topic-field">
-            <label>${text.chooseBooks}</label>
+            <div class="wr-topic-field-heading"><label>${text.chooseBooks}</label><button class="wr-topic-text-action" type="button" data-wr-action="add-library-book" data-return="group">${iconSvg("plus")}<span>添加书籍</span></button></div>
             <input class="wr-topic-input wr-topic-book-search" type="search" data-wr-action="filter-books" placeholder="搜索书名或作者" value="${escapeHtml(state.bookFilter)}" autocomplete="off">
             <div data-wr-book-picker>${bookPickerHtml()}</div>
           </div>
@@ -3679,14 +4229,14 @@
       </div>
       <div class="wr-topic-detail-desc">${escapeHtml(group.description || "暂无描述")}</div>
       <div class="wr-topic-book-list wr-topic-group-book-list">
-        ${(group.books || [])
+        ${groupBooks(group)
           .map((book) => {
             const context = getBookContextSummary(book.id);
             const contextLabel = context || "暂无阅读上下文，点击添加";
             return `
               <article class="wr-topic-group-book-card">
                 <button class="wr-topic-group-book-cover-action" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" aria-label="打开书籍阅读上下文：${escapeHtml(book.title)}">
-                  <img class="wr-topic-group-book-cover" src="${escapeHtml(book.cover)}" alt="">
+                  ${coverMarkup(book, "wr-topic-group-book-cover")}
                 </button>
                 <div class="wr-topic-group-book-content">
                   <button class="wr-topic-group-book-title-action" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文：${escapeHtml(book.title)}">${escapeHtml(book.title)}</button>
@@ -3799,7 +4349,7 @@
       withContext: (state.obsidianCache.books || []).filter(
         (book) => book.hasContext,
       ).length,
-      recognizedShelfBooks: state.books.length,
+      recognizedLibraryBooks: libraryBookList().length,
     };
     const sourceLabel = state.obsidianCache.resolvedAt
       ? `${state.obsidianCache.cached ? "缓存于" : "更新于"} ${new Date(state.obsidianCache.resolvedAt).toLocaleString("zh-CN")}`
@@ -3817,17 +4367,17 @@
           </div>
         </div>
         <div class="wr-topic-catalog-stats">
-          <div class="wr-topic-catalog-stat"><strong>${Number(stats.recognizedShelfBooks || state.books.length)}</strong><span>当前识别书籍</span></div>
-          <div class="wr-topic-catalog-stat"><strong>${Number(stats.inShelf || 0)}</strong><span>在微信书架</span></div>
-          <div class="wr-topic-catalog-stat"><strong>${Number(stats.notInShelf || 0)}</strong><span>不在微信书架</span></div>
+          <div class="wr-topic-catalog-stat"><strong>${Number(stats.recognizedLibraryBooks || libraryBookList().length)}</strong><span>本地书库书籍</span></div>
+          <div class="wr-topic-catalog-stat"><strong>${Number(stats.inShelf || 0)}</strong><span>已匹配本地</span></div>
+          <div class="wr-topic-catalog-stat"><strong>${Number(stats.notInShelf || 0)}</strong><span>未匹配本地</span></div>
           <div class="wr-topic-catalog-stat"><strong>${Number(stats.withContext || 0)}</strong><span>包含 WHY</span></div>
         </div>
         <div class="wr-topic-catalog-controls">
           <input class="wr-topic-input wr-topic-catalog-search" type="search" data-wr-action="filter-catalog" placeholder="搜索 Obsidian 书名或匹配书名" value="${escapeHtml(state.catalogQuery)}" autocomplete="off">
           ${[
             ["all", "全部"],
-            ["in", "在书架"],
-            ["out", "不在书架"],
+            ["in", "在书库"],
+            ["out", "不在书库"],
           ]
             .map(
               ([value, label]) =>
@@ -3907,6 +4457,440 @@
         </div>
         <div class="wr-topic-graded-list" data-wr-graded-list>${gradedReadingListHtml()}</div>
       </section>`;
+  }
+
+  function pendingBookLinks() {
+    const books = libraryBookList();
+    const wereadBooks = books.filter((book) => book.source === "weread" && book.wereadBookId);
+    return books
+      .filter((book) => book.source === "manual" && !book.wereadBookId)
+      .flatMap((manual) =>
+        wereadBooks
+          .filter(
+            (weread) =>
+              weread.id !== manual.id &&
+              weread.normalizedTitle === manual.normalizedTitle &&
+              !(manual.ignoredWereadBookIds || []).includes(weread.wereadBookId),
+          )
+          .map((weread) => ({ manual, weread })),
+      );
+  }
+
+  function filteredLibraryBooks() {
+    const query = state.libraryQuery.trim().toLocaleLowerCase();
+    return libraryBookList().filter((book) => {
+      if (state.libraryFilter === "weread" && book.source !== "weread") return false;
+      if (state.libraryFilter === "manual" && book.source !== "manual") return false;
+      if (query && !`${book.title} ${book.author}`.toLocaleLowerCase().includes(query)) return false;
+      return true;
+    });
+  }
+
+  function libraryBookCardHtml(book) {
+    const context = getBookContextSummary(book.id);
+    return `
+      <article class="wr-topic-library-card">
+        <button class="wr-topic-library-main" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" aria-label="打开书籍阅读上下文：${escapeHtml(book.title)}">
+          ${coverMarkup(book, "wr-topic-library-cover")}
+          <span class="wr-topic-library-content">
+            <span class="wr-topic-library-title">${escapeHtml(book.title)}</span>
+            <span class="wr-topic-library-meta">${escapeHtml(book.author || "未知作者")} · ${book.source === "weread" ? "微信读书" : "外部书"}</span>
+            <span class="wr-topic-library-context">${escapeHtml(context || "暂无阅读上下文")}</span>
+          </span>
+        </button>
+        <div class="wr-topic-library-card-actions">
+          <button class="wr-topic-icon-btn" type="button" data-wr-action="edit-library-book" data-book-id="${escapeHtml(book.id)}" title="编辑书籍" aria-label="编辑书籍">${iconSvg("edit")}</button>
+          <button class="wr-topic-icon-btn danger" type="button" data-wr-action="delete-library-book" data-book-id="${escapeHtml(book.id)}" title="删除书籍" aria-label="删除书籍">${iconSvg("trash")}</button>
+        </div>
+      </article>`;
+  }
+
+  function renderLibraryView() {
+    const pending = pendingBookLinks();
+    const filters = [
+      ["all", "全部"],
+      ["weread", "微信读书"],
+      ["manual", "外部书"],
+      ["pending", `待关联 ${pending.length}`],
+    ];
+    const pendingHtml = pending.length
+      ? `<div class="wr-topic-library-grid">${pending
+          .map(
+            ({ manual, weread }) => `
+              <article class="wr-topic-link-banner">
+                <strong>${escapeHtml(manual.title)}</strong><br>
+                外部书可能对应微信读书版本${weread.author ? ` · ${escapeHtml(weread.author)}` : ""}
+                <div class="wr-topic-link-actions">
+                  <button class="wr-topic-btn primary" type="button" data-wr-action="review-book-link" data-manual-id="${escapeHtml(manual.id)}" data-weread-id="${escapeHtml(weread.id)}">确认关联</button>
+                  <button class="wr-topic-btn" type="button" data-wr-action="ignore-book-link" data-manual-id="${escapeHtml(manual.id)}" data-weread-id="${escapeHtml(weread.id)}">不是同一本</button>
+                </div>
+              </article>`,
+          )
+          .join("")}</div>`
+      : `<div class="wr-topic-empty">没有待确认的微信读书版本。</div>`;
+    const books = filteredLibraryBooks();
+    return `
+      <section class="wr-topic-library">
+        <div class="wr-topic-library-head">
+          <div><h3>书籍管理</h3><p>统一维护微信读书书籍和手动添加的外部书。</p></div>
+          <button class="wr-topic-btn" type="button" data-wr-action="add-library-book" data-return="library">${iconSvg("plus")}<span>添加书籍</span></button>
+        </div>
+        <div class="wr-topic-library-controls">
+          <input class="wr-topic-input wr-topic-library-search" type="search" data-wr-action="filter-library" placeholder="搜索书名或作者" value="${escapeHtml(state.libraryQuery)}" autocomplete="off">
+          ${filters
+            .map(
+              ([value, label]) => `<button class="wr-topic-btn wr-topic-catalog-filter ${state.libraryFilter === value ? "active" : ""}" type="button" data-wr-action="library-filter" data-filter="${value}">${label}</button>`,
+            )
+            .join("")}
+        </div>
+        <div class="wr-topic-library-list" data-wr-library-list>
+          ${
+            state.libraryFilter === "pending"
+              ? pendingHtml
+              : books.length
+                ? `<div class="wr-topic-library-grid">${books.map(libraryBookCardHtml).join("")}</div>`
+                : `<div class="wr-topic-empty">没有符合当前筛选条件的书籍。</div>`
+          }
+        </div>
+      </section>`;
+  }
+
+  function openLibraryBookEditor({ bookId = "", returnTo = "library", prefillTitle = "" } = {}) {
+    const existing = getLibraryBook(bookId);
+    state.editingBookId = existing ? existing.id : "";
+    state.bookModalReturn = { type: returnTo };
+    document.getElementById("wr-topic-book-editor-modal")?.remove();
+    const book = existing || {
+      title: prefillTitle,
+      author: "",
+      coverUrl: "",
+      detailUrl: "",
+      readerUrl: "",
+    };
+    const modal = document.createElement("div");
+    modal.className = "wr-topic-modal wr-topic-nested-modal";
+    modal.id = "wr-topic-book-editor-modal";
+    modal.innerHTML = `
+      <div class="wr-topic-modal-card wr-topic-book-editor" role="dialog" aria-modal="true" aria-label="${existing ? "编辑书籍" : "添加书籍"}">
+        <div class="wr-topic-modal-head">
+          <h3>${existing ? "编辑书籍" : "添加书籍"}</h3>
+          <button class="wr-topic-icon-btn" type="button" data-wr-action="close-book-editor" title="关闭" aria-label="关闭">${iconSvg("x")}</button>
+        </div>
+        <form class="wr-topic-book-editor-form" data-wr-form="library-book" data-book-id="${escapeHtml(existing ? existing.id : "")}">
+          <div class="wr-topic-field"><label for="wr-library-title">书名</label><input id="wr-library-title" class="wr-topic-input" name="title" maxlength="300" value="${escapeHtml(book.title)}" required autocomplete="off"></div>
+          <div class="wr-topic-field"><label for="wr-library-author">作者</label><input id="wr-library-author" class="wr-topic-input" name="author" maxlength="300" value="${escapeHtml(book.author)}" autocomplete="off"></div>
+          <div class="wr-topic-field"><label for="wr-library-cover">封面 URL</label><input id="wr-library-cover" class="wr-topic-input" name="coverUrl" type="url" maxlength="2048" value="${escapeHtml(book.coverUrl)}" placeholder="https://..."></div>
+          <div class="wr-topic-field"><label for="wr-library-detail">书籍详情 URL</label><input id="wr-library-detail" class="wr-topic-input" name="detailUrl" type="url" maxlength="2048" value="${escapeHtml(book.detailUrl)}" placeholder="https://..."></div>
+          <div class="wr-topic-field"><label for="wr-library-reader">阅读入口 URL</label><input id="wr-library-reader" class="wr-topic-input" name="readerUrl" type="url" maxlength="2048" value="${escapeHtml(book.readerUrl)}" placeholder="https://..."></div>
+          <div class="wr-topic-modal-actions"><button class="wr-topic-btn" type="button" data-wr-action="close-book-editor">取消</button><button class="wr-topic-btn primary" type="submit">保存</button></div>
+        </form>
+      </div>`;
+    safeAppend(getMountRoot(), modal, "library book editor");
+  }
+
+  function closeLibraryBookEditor() {
+    document.getElementById("wr-topic-book-editor-modal")?.remove();
+    state.editingBookId = "";
+    state.bookModalReturn = null;
+  }
+
+  async function persistBookDependentState() {
+    await Promise.all([
+      dbSet(STORE.libraryBooks, state.libraryBooks),
+      dbSet(STORE.groups, state.groups),
+      dbSet(STORE.notes, state.notes),
+      dbSet(STORE.readingLevels, state.readingLevels),
+      dbSet(STORE.relations, state.relations),
+    ]);
+    await markLocalChange();
+  }
+
+  async function refreshBookSnapshots(bookId) {
+    const book = getLibraryBook(bookId);
+    if (!book) return;
+    if (state.notes[bookId] && state.notes[bookId].book) {
+      state.notes[bookId].book = legacyBookSnapshot(book);
+    }
+    if (state.readingLevels[bookId] && state.readingLevels[bookId].book) {
+      state.readingLevels[bookId].book = legacyBookSnapshot(book);
+    }
+    for (const relation of state.relations) {
+      if (relation.fromBookId === bookId) relation.from = await relationRefForLibraryBook(book);
+      if (relation.toBookId === bookId) relation.to = await relationRefForLibraryBook(book);
+    }
+  }
+
+  async function saveLibraryBookFromForm(form) {
+    const title = form.elements.title.value.trim();
+    if (!title) return;
+    let coverUrl;
+    let detailUrl;
+    let readerUrl;
+    try {
+      coverUrl = validateOptionalHttpsUrl(form.elements.coverUrl.value, "封面 URL");
+      detailUrl = validateOptionalHttpsUrl(form.elements.detailUrl.value, "书籍详情 URL");
+      readerUrl = validateOptionalHttpsUrl(form.elements.readerUrl.value, "阅读入口 URL");
+    } catch (error) {
+      alert(error.message);
+      return;
+    }
+    const existing = getLibraryBook(form.dataset.bookId);
+    if (!existing) {
+      const duplicate = libraryBookList().find((book) => book.normalizedTitle === normalizeTitle(title));
+      if (duplicate && !confirm(`书库中已有同名书籍“${duplicate.title}”。仍要作为另一版本创建吗？`)) return;
+    }
+    const timestamp = nowIso();
+    const id = existing
+      ? existing.id
+      : `local_${window.crypto && typeof window.crypto.randomUUID === "function" ? window.crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
+    state.libraryBooks[id] = normalizeLibraryBook(
+      {
+        ...(existing || {}),
+        id,
+        title,
+        author: form.elements.author.value.trim(),
+        coverUrl,
+        detailUrl,
+        readerUrl,
+        source: existing ? existing.source : "manual",
+        createdAt: (existing && existing.createdAt) || timestamp,
+        updatedAt: timestamp,
+      },
+      id,
+      existing ? existing.source : "manual",
+    );
+    delete state.syncMeta.tombstones.books[id];
+    await refreshBookSnapshots(id);
+    const returnType = state.bookModalReturn && state.bookModalReturn.type;
+    await persistBookDependentState();
+    closeLibraryBookEditor();
+    if (returnType === "group") {
+      state.selectedBookIds.add(id);
+      updateBookPicker();
+    } else if (returnType === "relation") {
+      const relationForm = document.querySelector('#wr-topic-relation-modal [data-wr-form="relation"]');
+      if (relationForm) {
+        relationForm.dataset.targetBookId = id;
+        relationForm.elements.title.value = title;
+        renderRelationCandidates(relationForm.elements.title);
+        relationForm.requestSubmit();
+      }
+    }
+    renderPanel();
+  }
+
+  async function deleteLibraryBook(bookId) {
+    const book = getLibraryBook(bookId);
+    if (!book) return;
+    if (book.wereadBookId && state.books.some((item) => item.id === book.wereadBookId)) {
+      alert("这本书仍在当前微信读书书架中。请先从微信读书书架移除，再删除本地主档。");
+      return;
+    }
+    const affectedGroups = state.groups.filter((group) => (group.bookIds || []).includes(bookId));
+    const relationCount = state.relations.filter(
+      (relation) => relation.fromBookId === bookId || relation.toBookId === bookId,
+    ).length;
+    const summary = `将同时移出 ${affectedGroups.length} 个主题组，删除 ${state.notes[bookId] ? 1 : 0} 条上下文、${state.readingLevels[bookId] ? 1 : 0} 条分级和 ${relationCount} 条关系。`;
+    if (!confirm(`确定删除“${book.title}”吗？\n${summary}`)) return;
+    if (!confirm("此操作会同步到其他设备，确定继续吗？")) return;
+    const timestamp = nowIso();
+    state.groups = state.groups.map((group) =>
+      (group.bookIds || []).includes(bookId)
+        ? { ...group, bookIds: group.bookIds.filter((id) => id !== bookId), updatedAt: timestamp }
+        : group,
+    );
+    if (state.notes[bookId]) {
+      delete state.notes[bookId];
+      markDeleted("notes", bookId, timestamp);
+    }
+    if (state.readingLevels[bookId]) {
+      delete state.readingLevels[bookId];
+      markDeleted("levels", bookId, timestamp);
+    }
+    state.relations = state.relations.filter((relation) => {
+      const remove = relation.fromBookId === bookId || relation.toBookId === bookId;
+      if (remove) markDeleted("relations", relation.id, timestamp);
+      return !remove;
+    });
+    delete state.libraryBooks[bookId];
+    markDeleted("books", bookId, timestamp);
+    delete state.obsidianCache.contexts[bookId];
+    await dbSet(STORE.obsidianCache, state.obsidianCache);
+    await persistBookDependentState();
+    renderPanel();
+    refreshShelf();
+  }
+
+  function conflictChoiceHtml(name, label, manualValue, wereadValue, allowCombine = false) {
+    if (!manualValue || !wereadValue || manualValue === wereadValue) return "";
+    return `
+      <div class="wr-topic-field">
+        <label>${label}</label>
+        <select class="wr-topic-input" name="${name}">
+          <option value="manual">保留外部书版本</option>
+          <option value="weread">保留微信读书版本</option>
+          ${allowCombine ? '<option value="combine">合并两边内容</option>' : ""}
+        </select>
+      </div>`;
+  }
+
+  function openBookLinkEditor(manualId, wereadId) {
+    const manual = getLibraryBook(manualId);
+    const weread = getLibraryBook(wereadId);
+    if (!manual || !weread) return;
+    const manualNote = state.notes[manualId] || {};
+    const wereadNote = state.notes[wereadId] || {};
+    const manualLevel = readingLevelForBook(manualId);
+    const wereadLevel = readingLevelForBook(wereadId);
+    document.getElementById("wr-topic-book-link-modal")?.remove();
+    const modal = document.createElement("div");
+    modal.className = "wr-topic-modal wr-topic-nested-modal";
+    modal.id = "wr-topic-book-link-modal";
+    modal.innerHTML = `
+      <div class="wr-topic-modal-card wr-topic-link-editor" role="dialog" aria-modal="true" aria-label="关联微信读书版本">
+        <div class="wr-topic-modal-head"><h3>关联微信读书版本</h3><button class="wr-topic-icon-btn" type="button" data-wr-action="close-book-link" title="关闭" aria-label="关闭">${iconSvg("x")}</button></div>
+        <div class="wr-topic-link-compare">
+          <div class="wr-topic-link-book"><strong>外部书</strong><p>${escapeHtml(manual.title)}</p><p>${escapeHtml(manual.author || "未知作者")}</p></div>
+          <div class="wr-topic-link-book"><strong>微信读书</strong><p>${escapeHtml(weread.title)}</p><p>${escapeHtml(weread.author || "未知作者")}</p></div>
+        </div>
+        <form class="wr-topic-book-editor-form" data-wr-form="book-link" data-manual-id="${escapeHtml(manualId)}" data-weread-id="${escapeHtml(wereadId)}">
+          ${conflictChoiceHtml("noteChoice", "我为什么读这本书", manualNote.note, wereadNote.note, true)}
+          ${conflictChoiceHtml("questionChoice", "阅读问题", manualNote.question, wereadNote.question, true)}
+          ${conflictChoiceHtml("levelChoice", "阅读分级", manualLevel === "unclassified" ? "" : manualLevel, wereadLevel === "unclassified" ? "" : wereadLevel)}
+          <p class="wr-topic-field-hint">确认后保留外部书的稳定 ID，主题组和阅读关系会自动合并。</p>
+          <div class="wr-topic-modal-actions"><button class="wr-topic-btn" type="button" data-wr-action="close-book-link">取消</button><button class="wr-topic-btn primary" type="submit">确认关联</button></div>
+        </form>
+      </div>`;
+    safeAppend(getMountRoot(), modal, "book link editor");
+  }
+
+  function chooseMergedValue(manualValue, wereadValue, choice) {
+    if (!manualValue) return String(wereadValue || "");
+    if (!wereadValue || manualValue === wereadValue) return String(manualValue);
+    if (choice === "weread") return String(wereadValue);
+    if (choice === "combine") return `${manualValue}\n\n${wereadValue}`;
+    return String(manualValue);
+  }
+
+  async function mergeLinkedBooks(form) {
+    const manualId = form.dataset.manualId;
+    const wereadId = form.dataset.wereadId;
+    const manual = getLibraryBook(manualId);
+    const weread = getLibraryBook(wereadId);
+    if (!manual || !weread) return;
+    const timestamp = nowIso();
+    const manualNote = state.notes[manualId] || {};
+    const wereadNote = state.notes[wereadId] || {};
+    const mergedBook = normalizeLibraryBook(
+      {
+        ...manual,
+        title: weread.title || manual.title,
+        author: weread.author || manual.author,
+        coverUrl: weread.coverUrl || manual.coverUrl,
+        detailUrl: weread.detailUrl || manual.detailUrl,
+        readerUrl: weread.readerUrl || manual.readerUrl,
+        source: "weread",
+        wereadBookId: weread.wereadBookId,
+        updatedAt: timestamp,
+      },
+      manualId,
+      "weread",
+    );
+    state.libraryBooks[manualId] = mergedBook;
+
+    state.groups = state.groups.map((group) => {
+      const ids = (group.bookIds || []).map((id) => (id === wereadId ? manualId : id));
+      const changed = ids.some((id, index) => id !== (group.bookIds || [])[index]);
+      return changed ? { ...group, bookIds: [...new Set(ids)], updatedAt: timestamp } : group;
+    });
+
+    if (manualNote.note || manualNote.question || wereadNote.note || wereadNote.question) {
+      state.notes[manualId] = {
+        ...manualNote,
+        book: legacyBookSnapshot(mergedBook),
+        note: chooseMergedValue(manualNote.note, wereadNote.note, form.elements.noteChoice?.value),
+        question: chooseMergedValue(manualNote.question, wereadNote.question, form.elements.questionChoice?.value),
+        updatedAt: timestamp,
+      };
+      delete state.syncMeta.tombstones.notes[manualId];
+    }
+    if (state.notes[wereadId]) {
+      delete state.notes[wereadId];
+      markDeleted("notes", wereadId, timestamp);
+    }
+
+    const manualLevel = state.readingLevels[manualId];
+    const wereadLevel = state.readingLevels[wereadId];
+    const levelChoice = form.elements.levelChoice?.value;
+    const chosenLevel =
+      levelChoice === "weread" ? wereadLevel : manualLevel || wereadLevel;
+    if (chosenLevel) {
+      state.readingLevels[manualId] = {
+        ...chosenLevel,
+        book: legacyBookSnapshot(mergedBook),
+        updatedAt: timestamp,
+      };
+      delete state.syncMeta.tombstones.levels[manualId];
+    }
+    if (state.readingLevels[wereadId]) {
+      delete state.readingLevels[wereadId];
+      markDeleted("levels", wereadId, timestamp);
+    }
+
+    const rewired = new Map();
+    const rewiredSourceTimes = new Map();
+    for (const relation of state.relations) {
+      const fromBookId = relation.fromBookId === wereadId ? manualId : relation.fromBookId;
+      const toBookId = relation.toBookId === wereadId ? manualId : relation.toBookId;
+      if (fromBookId === toBookId) {
+        markDeleted("relations", relation.id, timestamp);
+        continue;
+      }
+      const id = await relationIdForBookIds(fromBookId, toBookId);
+      const nextRelation = {
+        ...relation,
+        id,
+        fromBookId,
+        toBookId,
+        from: await relationRefForLibraryBook(state.libraryBooks[fromBookId]),
+        to: await relationRefForLibraryBook(state.libraryBooks[toBookId]),
+        updatedAt: relation.id === id ? relation.updatedAt : timestamp,
+      };
+      const sourceTime = timestampValue(relation.updatedAt);
+      if (!rewired.has(id) || sourceTime >= (rewiredSourceTimes.get(id) || 0)) {
+        rewired.set(id, nextRelation);
+        rewiredSourceTimes.set(id, sourceTime);
+      }
+      if (relation.id !== id) markDeleted("relations", relation.id, timestamp);
+    }
+    state.relations = [...rewired.values()];
+    delete state.libraryBooks[wereadId];
+    markDeleted("books", wereadId, timestamp);
+    delete state.syncMeta.tombstones.books[manualId];
+    if (state.obsidianCache.contexts[wereadId] && !state.obsidianCache.contexts[manualId]) {
+      state.obsidianCache.contexts[manualId] = state.obsidianCache.contexts[wereadId];
+    }
+    delete state.obsidianCache.contexts[wereadId];
+    await dbSet(STORE.obsidianCache, state.obsidianCache);
+    await persistBookDependentState();
+    document.getElementById("wr-topic-book-link-modal")?.remove();
+    renderPanel();
+    refreshShelf();
+  }
+
+  async function ignoreBookLink(manualId, wereadId) {
+    const manual = getLibraryBook(manualId);
+    const weread = getLibraryBook(wereadId);
+    if (!manual || !weread || !weread.wereadBookId) return;
+    state.libraryBooks[manualId] = {
+      ...manual,
+      ignoredWereadBookIds: [
+        ...new Set([...(manual.ignoredWereadBookIds || []), weread.wereadBookId]),
+      ],
+      updatedAt: nowIso(),
+    };
+    await saveLibraryBooks(state.libraryBooks);
+    renderPanel();
   }
 
   function suggestedCloudKey() {
@@ -4069,6 +5053,7 @@
               <button class="wr-topic-tab ${state.panelTab === "groups" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "groups"}" data-wr-action="switch-tab" data-tab="groups">${text.groups}</button>
               <button class="wr-topic-tab ${state.panelTab === "catalog" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "catalog"}" data-wr-action="switch-tab" data-tab="catalog">${text.catalog}</button>
               <button class="wr-topic-tab ${state.panelTab === "levels" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "levels"}" data-wr-action="switch-tab" data-tab="levels">${text.gradedReading}</button>
+              <button class="wr-topic-tab ${state.panelTab === "library" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "library"}" data-wr-action="switch-tab" data-tab="library">${text.bookManagement}</button>
             </div>
           </header>
           ${
@@ -4076,9 +5061,11 @@
               ? renderCatalogView()
               : state.panelTab === "levels"
                 ? renderGradedReadingView()
-              : `<div class="wr-topic-panel-body">
+                : state.panelTab === "library"
+                  ? renderLibraryView()
+                : `<div class="wr-topic-panel-body">
                   <section class="wr-topic-sidebar">
-                    <div class="wr-topic-count">${text.recognized(state.books.length)}</div>
+                    <div class="wr-topic-count">微信书架 ${state.books.length} 本 · 本地书库 ${libraryBookList().length} 本</div>
                     <h3>${text.groups}</h3>
                     <div class="wr-topic-group-scroll">
                       ${renderGroupList(groups)}
@@ -4167,16 +5154,14 @@
 
     const groups = getGroups();
     const now = new Date().toISOString();
-    const books = [...state.selectedBookIds]
-      .map((id) => findBook(id))
-      .filter(Boolean);
+    const bookIds = [...state.selectedBookIds].filter((id) => getLibraryBook(id));
 
     if (state.formMode === "edit") {
       const group = groups.find((item) => item.id === state.editingGroupId);
       if (!group) return;
       group.name = name;
       group.description = description;
-      group.books = books;
+      group.bookIds = bookIds;
       group.updatedAt = now;
       state.selectedGroupId = group.id;
     } else {
@@ -4184,7 +5169,7 @@
         id: `topic_${Date.now()}`,
         name,
         description,
-        books,
+        bookIds,
         createdAt: now,
         updatedAt: now,
       };
@@ -4203,10 +5188,10 @@
     const group = groups.find((item) => item.id === groupId);
     if (!group) return;
 
-    group.books = (group.books || []).filter((book) => book.id !== bookId);
+    group.bookIds = (group.bookIds || []).filter((id) => id !== bookId);
     group.updatedAt = new Date().toISOString();
 
-    if (!group.books.length) {
+    if (!group.bookIds.length) {
       const keep = confirm(
         "这个主题已经没有书了，是否删除主题？点击取消则保留空主题。",
       );
@@ -4298,6 +5283,7 @@
   function renderBookNoteContent(bookId) {
     const book = findBook(bookId);
     if (!book) return "";
+    const readerUrl = readerUrlForBook(book);
     const notes = getNotes();
     const note = notes[bookId] || { note: "", question: "" };
     const draft = state.noteDrafts[bookId] || {};
@@ -4335,7 +5321,8 @@
                 ${readingLevelOptionsHtml(book.id)}
               </select>
             </label>
-            ${book.url ? `<button class="wr-topic-btn wr-topic-modal-reader-btn" type="button" data-wr-action="open-reader" data-url="${escapeHtml(book.url)}">${iconSvg("bookOpen")}<span>${text.openReader}</span></button>` : ""}
+            ${readerUrl ? `<button class="wr-topic-btn wr-topic-modal-reader-btn" type="button" data-wr-action="open-reader" data-url="${escapeHtml(readerUrl)}">${iconSvg("bookOpen")}<span>${text.openReader}</span></button>` : ""}
+            ${book.detailUrl && book.detailUrl !== readerUrl ? `<button class="wr-topic-btn" type="button" data-wr-action="open-external" data-url="${escapeHtml(book.detailUrl)}">${iconSvg("external")}<span>查看详情</span></button>` : ""}
           </div>
         </div>
         <form class="wr-topic-form" data-wr-form="note" data-book-id="${escapeHtml(bookId)}" data-obsidian-authoritative="${obsidianAuthoritative ? "1" : "0"}">
@@ -4398,10 +5385,32 @@
     state.noteDrafts = {};
   }
 
-  function relationEditorOptions() {
-    return allKnownBooks()
-      .map((book) => `<option value="${escapeHtml(book.title)}"></option>`)
-      .join("");
+  function relationCandidateBooks(input) {
+    const form = input.form;
+    const query = normalizeTitle(input.value);
+    const currentBookId = form ? form.dataset.currentBookId : "";
+    return libraryBookList()
+      .filter(
+        (book) =>
+          book.id !== currentBookId &&
+          (!query || normalizeTitle(`${book.title} ${book.author}`).includes(query)),
+      )
+      .slice(0, 8);
+  }
+
+  function renderRelationCandidates(input) {
+    const container = input.form?.querySelector("[data-wr-relation-candidates]");
+    if (!container) return;
+    const books = relationCandidateBooks(input);
+    const query = input.value.trim();
+    container.innerHTML = `
+      ${books
+        .map(
+          (book) => `<button class="wr-topic-relation-candidate" type="button" data-wr-action="select-relation-book" data-book-id="${escapeHtml(book.id)}"><span><strong>${escapeHtml(book.title)}</strong>${book.author ? `<br><small>${escapeHtml(book.author)}</small>` : ""}</span><span>${book.source === "weread" ? "微信读书" : "外部书"}</span></button>`,
+        )
+        .join("")}
+      ${query ? `<button class="wr-topic-text-action" type="button" data-wr-action="create-relation-book">${iconSvg("plus")}<span>将“${escapeHtml(query)}”创建为外部书籍</span></button>` : ""}
+    `;
   }
 
   function relationEndpointByNodeId(nodeId) {
@@ -4414,34 +5423,18 @@
 
   function openRelationModal({ bookId = "", nodeId = "", relationId = "", direction = "outgoing" } = {}) {
     const editing = state.relations.find((relation) => relation.id === relationId) || null;
-    const currentBook = bookId ? findBook(bookId) : null;
-    const currentNormalizedTitle = normalizeTitle(currentBook && currentBook.title);
-    const editingCurrentRef = editing
-      ? editing.from.normalizedTitle === currentNormalizedTitle
-        ? editing.from
-        : editing.to.normalizedTitle === currentNormalizedTitle
-          ? editing.to
-          : null
-      : null;
-    const currentRef = currentBook
-      ? {
-          nodeId: (editingCurrentRef && editingCurrentRef.nodeId) || nodeId,
-          bookId: currentBook.id,
-          title: currentBook.title,
-          normalizedTitle: normalizeTitle(currentBook.title),
-          detailUrl: currentBook.url || "",
-          coverUrl: currentBook.cover || "",
-        }
-      : relationEndpointByNodeId(nodeId) || (editing ? editing.from : null);
-    if (!currentRef) return;
+    const nodeRef = nodeId ? relationEndpointByNodeId(nodeId) : null;
+    const currentBook = findBook(bookId || (nodeRef && nodeRef.bookId));
+    if (!currentBook) return;
 
     let actualDirection = direction;
-    if (editing && currentRef.nodeId === editing.to.nodeId) actualDirection = "incoming";
+    if (editing && editing.toBookId === currentBook.id) actualDirection = "incoming";
     const otherRef = editing
       ? actualDirection === "incoming"
         ? editing.from
         : editing.to
       : null;
+    const otherBook = otherRef ? findBook(otherRef.bookId) : null;
     closeRelationModal();
     const modal = document.createElement("div");
     modal.className = "wr-topic-modal wr-topic-nested-modal";
@@ -4452,8 +5445,8 @@
           <h3>${editing ? "编辑发现" : text.addDiscovery}</h3>
           <button class="wr-topic-icon-btn" type="button" data-wr-action="close-relation-modal" title="关闭" aria-label="关闭">${iconSvg("x")}</button>
         </div>
-        <p class="wr-topic-relation-current">当前书籍：<strong>${escapeHtml(currentRef.title)}</strong></p>
-        <form class="wr-topic-relation-form" data-wr-form="relation" data-current-book-id="${escapeHtml(currentRef.bookId || bookId)}" data-current-node-id="${escapeHtml(currentRef.nodeId || nodeId)}" data-current-title="${escapeHtml(currentRef.title)}" data-current-url="${escapeHtml(currentRef.detailUrl || "")}" data-current-cover="${escapeHtml(currentRef.coverUrl || "")}" data-original-relation-id="${escapeHtml(editing ? editing.id : "")}">
+        <p class="wr-topic-relation-current">当前书籍：<strong>${escapeHtml(currentBook.title)}</strong></p>
+        <form class="wr-topic-relation-form" data-wr-form="relation" data-current-book-id="${escapeHtml(currentBook.id)}" data-target-book-id="${escapeHtml(otherBook ? otherBook.id : "")}" data-original-relation-id="${escapeHtml(editing ? editing.id : "")}">
           <fieldset class="wr-topic-segmented">
             <legend>方向</legend>
             <label><input type="radio" name="direction" value="outgoing" ${actualDirection === "outgoing" ? "checked" : ""}><span>这本书带我去</span></label>
@@ -4461,8 +5454,8 @@
           </fieldset>
           <div class="wr-topic-field">
             <label for="wr-relation-title">书名</label>
-            <input id="wr-relation-title" class="wr-topic-input" name="title" maxlength="300" list="wr-relation-book-options" value="${escapeHtml(otherRef ? otherRef.title : "")}" required autocomplete="off" data-wr-action="relation-title">
-            <datalist id="wr-relation-book-options">${relationEditorOptions()}</datalist>
+            <input id="wr-relation-title" class="wr-topic-input" name="title" maxlength="300" value="${escapeHtml(otherBook ? otherBook.title : "")}" required autocomplete="off" data-wr-action="relation-title">
+            <div class="wr-topic-relation-candidates" data-wr-relation-candidates></div>
           </div>
           <div class="wr-topic-field">
             <label for="wr-relation-reason">为什么想继续？</label>
@@ -4476,14 +5469,6 @@
               ["question-driven", "问题驱动"],
             ].map(([value, label], index) => `<label><input type="radio" name="type" value="${value}" ${(editing ? editing.type === value : index === 0) ? "checked" : ""}><span>${label}</span></label>`).join("")}
           </fieldset>
-          <div class="wr-topic-field">
-            <label for="wr-relation-url">书籍详情页 URL</label>
-            <input id="wr-relation-url" class="wr-topic-input" name="detailUrl" type="url" maxlength="2048" placeholder="https://..." value="${escapeHtml(otherRef ? otherRef.detailUrl : "")}">
-          </div>
-          <div class="wr-topic-field">
-            <label for="wr-relation-cover">书籍封面 URL</label>
-            <input id="wr-relation-cover" class="wr-topic-input" name="coverUrl" type="url" maxlength="2048" placeholder="https://..." value="${escapeHtml(otherRef ? otherRef.coverUrl : "")}">
-          </div>
           <div class="wr-topic-modal-actions">
             <button class="wr-topic-btn" type="button" data-wr-action="close-relation-modal">${text.cancel}</button>
             <button class="wr-topic-btn primary" type="submit">${text.save}</button>
@@ -4491,6 +5476,8 @@
         </form>
       </div>`;
     safeAppend(getMountRoot(), modal, "relation modal");
+    const input = modal.querySelector('[data-wr-action="relation-title"]');
+    if (input) renderRelationCandidates(input);
   }
 
   function closeRelationModal() {
@@ -4499,38 +5486,27 @@
   }
 
   function fillRelationCandidate(input) {
-    const match = allKnownBooks().find(
-      (book) => normalizeTitle(book.title) === normalizeTitle(input.value),
-    );
-    if (!match) return;
     const form = input.form;
     if (!form) return;
-    form.elements.title.value = match.title;
-    form.elements.detailUrl.value = match.url || "";
-    form.elements.coverUrl.value = match.cover || "";
-    activateExistingRelation(form);
+    const selected = findBook(form.dataset.targetBookId);
+    if (!selected || selected.title !== input.value) form.dataset.targetBookId = "";
+    renderRelationCandidates(input);
   }
 
   function activateExistingRelation(form) {
-    const currentTitle = normalizeTitle(form.dataset.currentTitle);
-    const targetTitle = normalizeTitle(form.elements.title.value);
-    if (!currentTitle || !targetTitle) return;
+    const currentBookId = form.dataset.currentBookId;
+    const targetBookId = form.dataset.targetBookId;
+    if (!currentBookId || !targetBookId) return;
     const outgoing = form.elements.direction.value === "outgoing";
     const duplicate = state.relations.find((relation) =>
       outgoing
-        ? relation.from.normalizedTitle === currentTitle &&
-          relation.to.normalizedTitle === targetTitle
-        : relation.from.normalizedTitle === targetTitle &&
-          relation.to.normalizedTitle === currentTitle,
+        ? relation.fromBookId === currentBookId && relation.toBookId === targetBookId
+        : relation.fromBookId === targetBookId && relation.toBookId === currentBookId,
     );
     if (!duplicate) return;
     form.dataset.originalRelationId = duplicate.id;
     form.elements.reason.value = duplicate.reason;
     form.elements.type.value = duplicate.type;
-    form.elements.detailUrl.value =
-      (outgoing ? duplicate.to : duplicate.from).detailUrl || "";
-    form.elements.coverUrl.value =
-      (outgoing ? duplicate.to : duplicate.from).coverUrl || "";
     const heading = form.closest(".wr-topic-relation-editor")?.querySelector("h3");
     if (heading) heading.textContent = "编辑发现";
   }
@@ -4551,48 +5527,46 @@
       return;
     }
 
-    let detailUrl;
-    let coverUrl;
-    try {
-      detailUrl = validateOptionalHttpsUrl(form.elements.detailUrl.value, "书籍详情 URL");
-      coverUrl = validateOptionalHttpsUrl(form.elements.coverUrl.value, "书籍封面 URL");
-    } catch (error) {
-      alert(error.message);
+    const currentBook = findBook(form.dataset.currentBookId);
+    let targetBook = findBook(form.dataset.targetBookId);
+    if (!targetBook) {
+      const exactMatches = libraryBookList().filter(
+        (book) => book.normalizedTitle === normalizeTitle(title),
+      );
+      if (exactMatches.length === 1) {
+        targetBook = exactMatches[0];
+        form.dataset.targetBookId = targetBook.id;
+      } else if (exactMatches.length > 1) {
+        alert("书库中有多个同名版本，请先从候选项中选择一本。");
+        return;
+      }
+    }
+    if (!targetBook) {
+      openLibraryBookEditor({ returnTo: "relation", prefillTitle: title });
       return;
     }
-
-    const currentBook =
-      findBook(form.dataset.currentBookId) || {
-        id: form.dataset.currentBookId,
-        title: form.dataset.currentTitle,
-        url: form.dataset.currentUrl,
-        cover: form.dataset.currentCover,
-      };
-    const knownTarget = allKnownBooks().find(
-      (book) => normalizeTitle(book.title) === normalizeTitle(title),
-    );
-    const targetBook = knownTarget || { id: "", title, url: detailUrl, cover: coverUrl };
-    if (knownTarget) {
-      targetBook.url = detailUrl || targetBook.url;
-      targetBook.cover = coverUrl || targetBook.cover;
+    if (!currentBook) return;
+    if (currentBook.id === targetBook.id) {
+      alert("不能把一本书关联到它自己。");
+      return;
     }
 
     const currentRef = await createRelationRef(currentBook);
     const targetRef = await createRelationRef(targetBook);
-    if (currentRef.nodeId === targetRef.nodeId) {
-      alert("不能把一本书关联到它自己。");
-      return;
-    }
     const outgoing = form.elements.direction.value === "outgoing";
     const from = outgoing ? currentRef : targetRef;
     const to = outgoing ? targetRef : currentRef;
-    const id = await relationIdForNodes(from.nodeId, to.nodeId);
+    const fromBookId = outgoing ? currentBook.id : targetBook.id;
+    const toBookId = outgoing ? targetBook.id : currentBook.id;
+    const id = await relationIdForBookIds(fromBookId, toBookId);
     const originalId = form.dataset.originalRelationId;
     const original = state.relations.find((relation) => relation.id === originalId);
     const duplicate = state.relations.find((relation) => relation.id === id);
     const timestamp = nowIso();
     const next = {
       id,
+      fromBookId,
+      toBookId,
       from,
       to,
       type: form.elements.type.value,
@@ -4627,42 +5601,53 @@
   function graphScopeData({ scope = "all", bookId = "", groupId = "" } = {}) {
     let relations = [...state.relations];
     const group = getGroups().find((item) => item.id === groupId);
+    const groupMembers = groupBooks(group);
+    const groupBookIds = new Set([
+      ...((group && Array.isArray(group.bookIds) ? group.bookIds : [])),
+      ...groupMembers.map((book) => String(book.id || "")),
+    ]);
     const groupTitles = new Set(
-      (group && group.books ? group.books : []).map((book) =>
-        normalizeTitle(book.title),
-      ),
+      groupMembers.map((book) => normalizeTitle(book.title)).filter(Boolean),
     );
+    const endpointBookId = (relation, side) =>
+      String(relation[`${side}BookId`] || relation[side]?.bookId || "");
+    const endpointInGroup = (relation, side) => {
+      const ref = relation[side] || {};
+      const endpointId = endpointBookId(relation, side);
+      return (
+        (endpointId && groupBookIds.has(endpointId)) ||
+        groupTitles.has(ref.normalizedTitle || normalizeTitle(ref.title))
+      );
+    };
     if (scope === "book") {
       const book = findBook(bookId);
       const normalized = normalizeTitle(book && book.title);
       relations = relations.filter(
         (relation) =>
-          relation.from.normalizedTitle === normalized ||
-          relation.to.normalizedTitle === normalized,
+          endpointBookId(relation, "from") === (book && book.id) ||
+          endpointBookId(relation, "to") === (book && book.id) ||
+          relation.from?.normalizedTitle === normalized ||
+          relation.to?.normalizedTitle === normalized,
       );
     } else if (scope === "group") {
       relations = relations.filter(
-        (relation) =>
-          groupTitles.has(relation.from.normalizedTitle) ||
-          groupTitles.has(relation.to.normalizedTitle),
+        (relation) => endpointInGroup(relation, "from") || endpointInGroup(relation, "to"),
       );
     }
 
     const nodes = new Map();
     relations.forEach((relation) => {
-      for (const ref of [relation.from, relation.to]) {
+      for (const [side, ref] of [["from", relation.from], ["to", relation.to]]) {
         const book = relationRefBook(ref);
+        const outside = scope === "group" && !endpointInGroup(relation, side);
         nodes.set(ref.nodeId, {
           id: ref.nodeId,
-          label:
-            scope === "group" && !groupTitles.has(ref.normalizedTitle)
-              ? `组外 · ${book.title}`
-              : book.title,
+          label: outside ? `组外 · ${book.title}` : book.title,
           title: book.title,
           cover: book.cover || ref.coverUrl || "",
           url: book.url || ref.detailUrl || "",
           bookId: book.id || "",
-          outside: scope === "group" && !groupTitles.has(ref.normalizedTitle),
+          outside,
         });
       }
     });
@@ -5076,6 +6061,8 @@
       actionEl.closest("#wr-topic-cloud-modal") ||
       actionEl.closest("#wr-topic-relation-modal") ||
       actionEl.closest("#wr-topic-graph-modal") ||
+      actionEl.closest("#wr-topic-book-editor-modal") ||
+      actionEl.closest("#wr-topic-book-link-modal") ||
       actionEl.classList.contains("wr-topic-entry") ||
       actionEl.classList.contains("wr-book-context-icon") ||
       actionEl.classList.contains("wr-topic-shelf-group")
@@ -5111,7 +6098,7 @@
     if (action === "load-full-shelf") autoLoadFullShelf();
     if (action === "switch-tab") {
       const nextTab = actionEl.dataset.tab;
-      state.panelTab = ["groups", "catalog", "levels"].includes(nextTab)
+      state.panelTab = ["groups", "catalog", "levels", "library"].includes(nextTab)
         ? nextTab
         : "groups";
       renderPanel();
@@ -5124,6 +6111,25 @@
       state.levelFilter = actionEl.dataset.filter || "all";
       renderPanel();
     }
+    if (action === "library-filter") {
+      state.libraryFilter = actionEl.dataset.filter || "all";
+      renderPanel();
+    }
+    if (action === "add-library-book") {
+      openLibraryBookEditor({ returnTo: actionEl.dataset.return || "library" });
+    }
+    if (action === "edit-library-book") {
+      openLibraryBookEditor({ bookId: actionEl.dataset.bookId, returnTo: "library" });
+    }
+    if (action === "delete-library-book") await deleteLibraryBook(actionEl.dataset.bookId);
+    if (action === "review-book-link") {
+      openBookLinkEditor(actionEl.dataset.manualId, actionEl.dataset.wereadId);
+    }
+    if (action === "ignore-book-link") {
+      await ignoreBookLink(actionEl.dataset.manualId, actionEl.dataset.wereadId);
+    }
+    if (action === "close-book-editor") closeLibraryBookEditor();
+    if (action === "close-book-link") document.getElementById("wr-topic-book-link-modal")?.remove();
     if (action === "refresh-catalog") {
       if (!isCloudConfigured()) {
         alert("请先配置并启用 Cloudflare KV 云同步。");
@@ -5149,7 +6155,7 @@
         (item) => item.id === actionEl.dataset.groupId,
       );
       state.selectedBookIds = new Set(
-        group ? (group.books || []).map((book) => book.id) : [],
+        group ? (group.bookIds || []).slice() : [],
       );
       state.bookFilter = "";
       renderPanel();
@@ -5202,6 +6208,24 @@
     if (action === "add-relation") {
       openRelationModal({ bookId: actionEl.dataset.bookId, direction: "outgoing" });
     }
+    if (action === "select-relation-book") {
+      const form = actionEl.closest('[data-wr-form="relation"]');
+      const book = findBook(actionEl.dataset.bookId);
+      if (form && book) {
+        form.dataset.targetBookId = book.id;
+        form.elements.title.value = book.title;
+        const candidates = form.querySelector("[data-wr-relation-candidates]");
+        if (candidates) candidates.innerHTML = "";
+        activateExistingRelation(form);
+      }
+    }
+    if (action === "create-relation-book") {
+      const form = actionEl.closest('[data-wr-form="relation"]');
+      openLibraryBookEditor({
+        returnTo: "relation",
+        prefillTitle: form ? form.elements.title.value.trim() : "",
+      });
+    }
     if (action === "edit-relation") {
       const noteForm = document.querySelector('#wr-topic-note-modal [data-wr-form="note"]');
       openRelationModal({
@@ -5243,11 +6267,13 @@
     if (form.dataset.wrForm === "note") await saveBookNote(form);
     if (form.dataset.wrForm === "cloud") await saveCloudSettings(form);
     if (form.dataset.wrForm === "relation") await saveRelationFromForm(form);
+    if (form.dataset.wrForm === "library-book") await saveLibraryBookFromForm(form);
+    if (form.dataset.wrForm === "book-link") await mergeLinkedBooks(form);
   }
 
   function onInput(event) {
     const actionEl = event.target.closest(
-      '[data-wr-action="filter-books"], [data-wr-action="filter-catalog"], [data-wr-action="filter-levels"], [data-wr-action="relation-title"], [data-wr-action="graph-search"]',
+      '[data-wr-action="filter-books"], [data-wr-action="filter-catalog"], [data-wr-action="filter-levels"], [data-wr-action="filter-library"], [data-wr-action="relation-title"], [data-wr-action="graph-search"]',
     );
     if (!actionEl) return;
 
@@ -5274,6 +6300,18 @@
       return;
     }
 
+    if (actionEl.dataset.wrAction === "filter-library") {
+      state.libraryQuery = actionEl.value || "";
+      const list = document.querySelector("[data-wr-library-list]");
+      if (list) {
+        const books = filteredLibraryBooks();
+        list.innerHTML = books.length
+          ? `<div class="wr-topic-library-grid">${books.map(libraryBookCardHtml).join("")}</div>`
+          : `<div class="wr-topic-empty">没有符合当前筛选条件的书籍。</div>`;
+      }
+      return;
+    }
+
     state.catalogQuery = actionEl.value || "";
     const list = document.querySelector("[data-wr-catalog-list]");
     if (list) list.innerHTML = catalogListHtml();
@@ -5296,7 +6334,11 @@
 
   function onKeydown(event) {
     if (event.key !== "Escape") return;
-    if (document.getElementById("wr-topic-relation-modal")) {
+    if (document.getElementById("wr-topic-book-editor-modal")) {
+      closeLibraryBookEditor();
+    } else if (document.getElementById("wr-topic-book-link-modal")) {
+      document.getElementById("wr-topic-book-link-modal")?.remove();
+    } else if (document.getElementById("wr-topic-relation-modal")) {
       closeRelationModal();
     } else if (document.getElementById("wr-topic-graph-modal")) {
       closeGraphModal();
