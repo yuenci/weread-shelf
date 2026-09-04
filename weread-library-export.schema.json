@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WeRead Local Library Export",
+  "description": "Portable reading data exported by WeRead Local Topic Shelf.",
+  "type": "object",
+  "required": ["format", "version", "exportedAt", "data"],
+  "properties": {
+    "format": { "const": "weread-local-library-export" },
+    "version": { "const": 1 },
+    "exportedAt": { "$ref": "#/$defs/timestamp" },
+    "data": {
+      "type": "object",
+      "required": ["books", "groups", "notes", "readingLevels", "relations"],
+      "properties": {
+        "books": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/libraryBook" }
+        },
+        "groups": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/topicGroup" }
+        },
+        "notes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/bookNote" }
+        },
+        "readingLevels": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/readingLevelRecord" }
+        },
+        "relations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/readingRelation" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "optionalHttpsUrl": {
+      "oneOf": [
+        { "const": "" },
+        { "type": "string", "pattern": "^https://", "maxLength": 2048 }
+      ]
+    },
+    "bookSnapshot": {
+      "type": "object",
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "author": { "type": "string" },
+        "url": { "type": "string" },
+        "cover": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "libraryBook": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "normalizedTitle",
+        "author",
+        "coverUrl",
+        "wereadCoverUrl",
+        "manualCoverUrl",
+        "detailUrl",
+        "readerUrl",
+        "source",
+        "wereadBookId",
+        "ignoredWereadBookIds",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "normalizedTitle": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "author": { "type": "string", "maxLength": 300 },
+        "coverUrl": { "$ref": "#/$defs/optionalHttpsUrl" },
+        "wereadCoverUrl": { "$ref": "#/$defs/optionalHttpsUrl" },
+        "manualCoverUrl": { "$ref": "#/$defs/optionalHttpsUrl" },
+        "detailUrl": { "$ref": "#/$defs/optionalHttpsUrl" },
+        "readerUrl": { "$ref": "#/$defs/optionalHttpsUrl" },
+        "source": { "enum": ["weread", "manual"] },
+        "wereadBookId": { "type": "string" },
+        "ignoredWereadBookIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": true
+    },
+    "topicGroup": {
+      "type": "object",
+      "required": ["id", "name", "description", "bookIds", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "bookIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "pinnedBookIds": {
+          "type": "array",
+          "description": "Ordered subset of bookIds. Earlier entries are displayed first.",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": true
+    },
+    "bookNote": {
+      "type": "object",
+      "required": ["note", "question", "updatedAt"],
+      "properties": {
+        "book": { "$ref": "#/$defs/bookSnapshot" },
+        "note": { "type": "string" },
+        "question": { "type": "string" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": true
+    },
+    "readingLevelRecord": {
+      "type": "object",
+      "required": ["level", "updatedAt"],
+      "properties": {
+        "book": { "$ref": "#/$defs/bookSnapshot" },
+        "level": { "enum": ["deep", "light", "casual"] },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": true
+    },
+    "relationBookRef": {
+      "type": "object",
+      "required": ["nodeId", "bookId", "title", "normalizedTitle", "detailUrl", "coverUrl"],
+      "properties": {
+        "nodeId": { "type": "string", "minLength": 1 },
+        "bookId": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "normalizedTitle": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "detailUrl": { "$ref": "#/$defs/optionalHttpsUrl" },
+        "coverUrl": { "$ref": "#/$defs/optionalHttpsUrl" }
+      },
+      "additionalProperties": true
+    },
+    "readingRelation": {
+      "type": "object",
+      "required": [
+        "id",
+        "fromBookId",
+        "toBookId",
+        "from",
+        "to",
+        "type",
+        "reason",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "fromBookId": { "type": "string", "minLength": 1 },
+        "toBookId": { "type": "string", "minLength": 1 },
+        "from": { "$ref": "#/$defs/relationBookRef" },
+        "to": { "$ref": "#/$defs/relationBookRef" },
+        "type": {
+          "enum": ["extended-reading", "author-citation", "question-driven"]
+        },
+        "reason": { "type": "string", "maxLength": 4000 },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": true
+    }
+  }
+}
