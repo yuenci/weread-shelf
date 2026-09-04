@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.1
+// @version      0.6.2
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -11,6 +11,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      workers.dev
 // @connect      res.weread.qq.com
+// @connect      cdn.weread.qq.com
 // @connect      *.tencent-cloud.com
 // ==/UserScript==
 
@@ -5807,9 +5808,7 @@
       const url = new URL(String(value || ""));
       return (
         url.protocol === "https:" &&
-        url.hostname === "res.weread.qq.com" &&
-        url.pathname.startsWith("/wrepub/") &&
-        url.pathname.endsWith("_parsecover")
+        ["res.weread.qq.com", "cdn.weread.qq.com"].includes(url.hostname)
       );
     } catch (error) {
       return false;
