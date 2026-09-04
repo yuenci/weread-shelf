@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.3
+// @version      0.6.4
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -155,6 +155,54 @@
 
   function nowIso() {
     return new Date().toISOString();
+  }
+
+  function buildLocalDataExport(exportedAt = nowIso()) {
+    return {
+      format: "weread-local-library-export",
+      version: 1,
+      exportedAt,
+      data: cloneJson({
+        books: state.libraryBooks,
+        groups: state.groups,
+        notes: state.notes,
+        readingLevels: state.readingLevels,
+        relations: state.relations,
+      }),
+    };
+  }
+
+  function localDataExportFileName(exportedAt = nowIso()) {
+    const date = new Date(exportedAt);
+    const safeDate = Number.isFinite(date.getTime()) ? date : new Date();
+    const pad = (value) => String(value).padStart(2, "0");
+    const day = [
+      safeDate.getFullYear(),
+      pad(safeDate.getMonth() + 1),
+      pad(safeDate.getDate()),
+    ].join("-");
+    const time = [
+      pad(safeDate.getHours()),
+      pad(safeDate.getMinutes()),
+      pad(safeDate.getSeconds()),
+    ].join("");
+    return `weread-library-${day}-${time}.json`;
+  }
+
+  function downloadLocalDataExport() {
+    const exportedAt = nowIso();
+    const blob = new Blob([JSON.stringify(buildLocalDataExport(exportedAt), null, 2)], {
+      type: "application/json;charset=utf-8",
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = localDataExportFileName(exportedAt);
+    link.hidden = true;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
   }
 
   function timestampValue(value) {
@@ -891,6 +939,8 @@
       info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
       library:
         '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
+      download:
+        '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
       bookOpen:
         '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3Z"/><path d="M21 18a1 1 0 0 0 1-1V5a2 2 0 0 0-2-2h-5a3 3 0 0 0-3 3v15a3 3 0 0 1 3-3Z"/>',
       check: '<path d="m20 6-11 11-5-5"/>',
@@ -2894,6 +2944,7 @@
 
       .wr-topic-field-heading,
       .wr-topic-library-head,
+      .wr-topic-library-head-actions,
       .wr-topic-library-controls,
       .wr-topic-library-card-actions,
       .wr-topic-link-actions {
@@ -2946,6 +2997,11 @@
       .wr-topic-library-head p {
         margin-top: 4px;
         font-size: 12px;
+      }
+
+      .wr-topic-library-head-actions {
+        flex-wrap: wrap;
+        justify-content: flex-end;
       }
 
       .wr-topic-library-controls {
@@ -4621,7 +4677,10 @@
       <section class="wr-topic-library">
         <div class="wr-topic-library-head">
           <div><h3>书籍管理</h3><p>统一维护微信读书书籍和手动添加的外部书。</p></div>
-          <button class="wr-topic-btn" type="button" data-wr-action="add-library-book" data-return="library">${iconSvg("plus")}<span>添加书籍</span></button>
+          <div class="wr-topic-library-head-actions">
+            <button class="wr-topic-btn ghost" type="button" data-wr-action="export-local-data">${iconSvg("download")}<span>导出数据</span></button>
+            <button class="wr-topic-btn" type="button" data-wr-action="add-library-book" data-return="library">${iconSvg("plus")}<span>添加书籍</span></button>
+          </div>
         </div>
         <div class="wr-topic-library-controls">
           <input class="wr-topic-input wr-topic-library-search" type="search" data-wr-action="filter-library" placeholder="搜索书名或作者" value="${escapeHtml(state.libraryQuery)}" autocomplete="off">
@@ -6331,6 +6390,7 @@
       state.libraryFilter = actionEl.dataset.filter || "all";
       renderPanel();
     }
+    if (action === "export-local-data") downloadLocalDataExport();
     if (action === "add-library-book") {
       openLibraryBookEditor({ returnTo: actionEl.dataset.return || "library" });
     }
