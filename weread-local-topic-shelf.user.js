@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.4
+// @version      0.6.5
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -651,7 +651,10 @@
       books: state.libraryBooks,
       tombstones: state.syncMeta.tombstones,
     });
-    const nextGroups = Array.isArray(payload.groups) ? payload.groups : [];
+    const nextGroups = incomingGroupsWithLocalPins(
+      Array.isArray(payload.groups) ? payload.groups : [],
+      state.groups,
+    );
     const nextNotes =
       payload.notes && typeof payload.notes === "object" ? payload.notes : {};
     const nextRelations = Array.isArray(payload.relations)
@@ -751,10 +754,66 @@
     );
   }
 
+  function groupBookIds(group) {
+    if (!group) return [];
+    const ids = Array.isArray(group.bookIds)
+      ? group.bookIds
+      : Array.isArray(group.books)
+        ? group.books.map((book) => book && book.id)
+        : [];
+    return [...new Set(ids.map(String).filter(Boolean))];
+  }
+
+  function groupPinnedBookIds(group) {
+    const members = new Set(groupBookIds(group));
+    const pinned = group && Array.isArray(group.pinnedBookIds)
+      ? group.pinnedBookIds
+      : [];
+    return [...new Set(pinned.map(String).filter((id) => members.has(id)))];
+  }
+
+  function groupBookIdsInDisplayOrder(group) {
+    const bookIds = groupBookIds(group);
+    const pinnedBookIds = groupPinnedBookIds(group);
+    const pinned = new Set(pinnedBookIds);
+    return [...pinnedBookIds, ...bookIds.filter((id) => !pinned.has(id))];
+  }
+
+  function groupWithBookPin(group, bookId, shouldPin) {
+    const id = String(bookId || "");
+    const bookIds = groupBookIds(group);
+    const current = groupPinnedBookIds(group).filter((item) => item !== id);
+    const pinnedBookIds = shouldPin && bookIds.includes(id)
+      ? [id, ...current]
+      : current;
+    return { ...group, pinnedBookIds };
+  }
+
+  function incomingGroupsWithLocalPins(incomingGroups, localGroups) {
+    const localById = new Map(
+      (Array.isArray(localGroups) ? localGroups : []).map((group) => [group.id, group]),
+    );
+    return (Array.isArray(incomingGroups) ? incomingGroups : []).map((group) => {
+      if (
+        !group ||
+        Object.prototype.hasOwnProperty.call(group, "pinnedBookIds")
+      ) {
+        return group;
+      }
+      const local = localById.get(group.id);
+      if (!local || !groupPinnedBookIds(local).length) return group;
+      const incomingMembers = new Set(groupBookIds(group));
+      return {
+        ...group,
+        pinnedBookIds: groupPinnedBookIds(local).filter((id) => incomingMembers.has(id)),
+      };
+    });
+  }
+
   function groupBooks(group) {
     if (!group) return [];
     if (Array.isArray(group.bookIds)) {
-      return group.bookIds.map((id) => findBook(id)).filter(Boolean);
+      return groupBookIdsInDisplayOrder(group).map((id) => findBook(id)).filter(Boolean);
     }
     return Array.isArray(group.books) ? group.books : [];
   }
@@ -941,6 +1000,8 @@
         '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
       download:
         '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+      pin:
+        '<path d="M12 17v5"/><path d="M5 17h14"/><path d="M6 17v-5a6 6 0 0 1 12 0v5"/><path d="M9 10V2h6v8"/>',
       bookOpen:
         '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3Z"/><path d="M21 18a1 1 0 0 0 1-1V5a2 2 0 0 0-2-2h-5a3 3 0 0 0-3 3v15a3 3 0 0 1 3-3Z"/>',
       check: '<path d="m20 6-11 11-5-5"/>',
@@ -2134,6 +2195,10 @@
         box-shadow: 0 8px 22px rgba(15, 23, 42, .07);
       }
 
+      .wr-topic-group-book-card.is-pinned {
+        border-color: rgba(47, 128, 237, .3);
+      }
+
       .wr-topic-group-book-cover-action,
       .wr-topic-group-book-title-action,
       .wr-topic-group-book-context {
@@ -2187,6 +2252,10 @@
         color: var(--wr-topic-blue);
       }
 
+      .wr-topic-group-book-card.is-pinned .wr-topic-group-book-title-action {
+        padding-right: 68px;
+      }
+
       .wr-topic-group-book-context {
         display: -webkit-box;
         flex: 1 1 0;
@@ -2216,6 +2285,21 @@
         top: 8px;
         right: 8px;
         z-index: 5;
+      }
+
+      .wr-topic-group-book-pin {
+        position: absolute;
+        top: 15px;
+        right: 43px;
+        z-index: 4;
+        display: inline-flex;
+        color: #4f7fb8;
+        pointer-events: none;
+      }
+
+      .wr-topic-group-book-pin .wr-topic-icon {
+        width: 13px;
+        height: 13px;
       }
 
       .wr-topic-group-book-menu-button {
@@ -3901,6 +3985,9 @@
         ? group.bookIds.filter((id) => books[id])
         : (group.books || []).map((book) => String(book.id || "")).filter((id) => books[id]);
       const migrated = { ...group, bookIds: [...new Set(bookIds)] };
+      if (Array.isArray(group.pinnedBookIds)) {
+        migrated.pinnedBookIds = groupPinnedBookIds(migrated);
+      }
       delete migrated.books;
       return migrated;
     });
@@ -4320,8 +4407,9 @@
     `;
   }
 
-  function readingLevelMenuHtml(book, groupId) {
+  function readingLevelMenuHtml(book, group) {
     const current = readingLevelForBook(book.id);
+    const isPinned = groupPinnedBookIds(group).includes(book.id);
     const levelItems = [
       ["deep", "深度阅读"],
       ["light", "轻度阅读"],
@@ -4341,12 +4429,16 @@
       <div class="wr-topic-group-book-menu">
         <button class="wr-topic-btn wr-topic-group-book-menu-button" type="button" data-wr-action="toggle-book-menu" title="书籍操作" aria-label="书籍操作" aria-haspopup="menu" aria-expanded="false">${iconSvg("moreVertical")}</button>
         <div class="wr-topic-book-menu-popover" data-wr-book-menu role="menu" hidden>
+          <button class="wr-topic-book-menu-item" type="button" role="menuitem" data-wr-action="toggle-book-pin" data-group-id="${escapeHtml(group.id)}" data-book-id="${escapeHtml(book.id)}" data-next-pinned="${!isPinned}">
+            <span>${isPinned ? "取消置顶" : "置顶"}</span>
+            ${iconSvg("pin")}
+          </button>
           <button class="wr-topic-book-menu-item" type="button" role="menuitem" data-wr-action="toggle-level-submenu" aria-haspopup="menu" aria-expanded="false">
             <span>阅读分级</span>
             ${iconSvg("chevronRight")}
           </button>
           <div class="wr-topic-level-submenu" data-wr-level-submenu role="menu" hidden>${levelItems}</div>
-          <button class="wr-topic-book-menu-item danger" type="button" role="menuitem" data-wr-action="remove-book" data-group-id="${escapeHtml(groupId)}" data-book-id="${escapeHtml(book.id)}">
+          <button class="wr-topic-book-menu-item danger" type="button" role="menuitem" data-wr-action="remove-book" data-group-id="${escapeHtml(group.id)}" data-book-id="${escapeHtml(book.id)}">
             <span>移出主题组</span>
             ${iconSvg("trash")}
           </button>
@@ -4377,8 +4469,9 @@
           .map((book) => {
             const context = getBookContextSummary(book.id);
             const contextLabel = context || "暂无阅读上下文，点击添加";
+            const isPinned = groupPinnedBookIds(group).includes(book.id);
             return `
-              <article class="wr-topic-group-book-card">
+              <article class="wr-topic-group-book-card${isPinned ? " is-pinned" : ""}">
                 <button class="wr-topic-group-book-cover-action" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" aria-label="打开书籍阅读上下文：${escapeHtml(book.title)}">
                   ${coverMarkup(book, "wr-topic-group-book-cover")}
                 </button>
@@ -4386,7 +4479,8 @@
                   <button class="wr-topic-group-book-title-action" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文：${escapeHtml(book.title)}">${escapeHtml(book.title)}</button>
                   <button class="wr-topic-group-book-context ${context ? "" : "is-empty"}" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文">${escapeHtml(contextLabel)}</button>
                 </div>
-                ${readingLevelMenuHtml(book, group.id)}
+                ${isPinned ? `<span class="wr-topic-group-book-pin" role="img" aria-label="已置顶" title="已置顶">${iconSvg("pin")}</span>` : ""}
+                ${readingLevelMenuHtml(book, group)}
               </article>
             `;
           })
@@ -4844,7 +4938,12 @@
     const timestamp = nowIso();
     state.groups = state.groups.map((group) =>
       (group.bookIds || []).includes(bookId)
-        ? { ...group, bookIds: group.bookIds.filter((id) => id !== bookId), updatedAt: timestamp }
+        ? {
+            ...group,
+            bookIds: group.bookIds.filter((id) => id !== bookId),
+            pinnedBookIds: groupPinnedBookIds(group).filter((id) => id !== bookId),
+            updatedAt: timestamp,
+          }
         : group,
     );
     if (state.notes[bookId]) {
@@ -4948,8 +5047,21 @@
 
     state.groups = state.groups.map((group) => {
       const ids = (group.bookIds || []).map((id) => (id === wereadId ? manualId : id));
+      const pins = groupPinnedBookIds(group).map((id) =>
+        id === wereadId ? manualId : id,
+      );
       const changed = ids.some((id, index) => id !== (group.bookIds || [])[index]);
-      return changed ? { ...group, bookIds: [...new Set(ids)], updatedAt: timestamp } : group;
+      const pinsChanged = pins.some(
+        (id, index) => id !== groupPinnedBookIds(group)[index],
+      );
+      return changed || pinsChanged
+        ? {
+            ...group,
+            bookIds: [...new Set(ids)],
+            pinnedBookIds: [...new Set(pins)],
+            updatedAt: timestamp,
+          }
+        : group;
     });
 
     if (manualNote.note || manualNote.question || wereadNote.note || wereadNote.question) {
@@ -5310,6 +5422,9 @@
       group.name = name;
       group.description = description;
       group.bookIds = bookIds;
+      group.pinnedBookIds = groupPinnedBookIds(group).filter((id) =>
+        bookIds.includes(id),
+      );
       group.updatedAt = now;
       state.selectedGroupId = group.id;
     } else {
@@ -5318,6 +5433,7 @@
         name,
         description,
         bookIds,
+        pinnedBookIds: [],
         createdAt: now,
         updatedAt: now,
       };
@@ -5337,6 +5453,7 @@
     if (!group) return;
 
     group.bookIds = (group.bookIds || []).filter((id) => id !== bookId);
+    group.pinnedBookIds = groupPinnedBookIds(group).filter((id) => id !== bookId);
     group.updatedAt = new Date().toISOString();
 
     if (!group.bookIds.length) {
@@ -5354,6 +5471,19 @@
     }
 
     refreshShelf();
+  }
+
+  async function setBookPinned(groupId, bookId, shouldPin) {
+    const groups = getGroups();
+    const group = groups.find((item) => item.id === groupId);
+    if (!group || !groupBookIds(group).includes(bookId)) return;
+    const isPinned = groupPinnedBookIds(group).includes(bookId);
+    if (isPinned === shouldPin) return;
+    Object.assign(group, groupWithBookPin(group, bookId, shouldPin));
+    group.updatedAt = nowIso();
+    await saveGroups(groups);
+    closeBookMenus();
+    renderPanel();
   }
 
   async function deleteGroup(groupId) {
@@ -6452,6 +6582,13 @@
     }
     if (action === "delete-group") await deleteGroup(actionEl.dataset.groupId);
     if (action === "toggle-book-menu") toggleBookMenu(actionEl);
+    if (action === "toggle-book-pin") {
+      await setBookPinned(
+        actionEl.dataset.groupId,
+        actionEl.dataset.bookId,
+        actionEl.dataset.nextPinned === "true",
+      );
+    }
     if (action === "toggle-level-submenu") toggleLevelSubmenu(actionEl);
     if (action === "set-reading-level") {
       try {
