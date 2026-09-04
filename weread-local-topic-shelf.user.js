@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.2
+// @version      0.6.3
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -155,6 +155,17 @@
 
   function nowIso() {
     return new Date().toISOString();
+  }
+
+  function timestampValue(value) {
+    const parsed = Date.parse(value || "");
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function timestampAfter(value, fallback = nowIso()) {
+    return new Date(
+      Math.max(timestampValue(fallback), timestampValue(value) + 1),
+    ).toISOString();
   }
 
   function createDeviceId() {
@@ -3564,6 +3575,14 @@
     };
   }
 
+  function libraryBookNeedsCoverFieldMigration(book) {
+    return Boolean(
+      book &&
+        (!Object.prototype.hasOwnProperty.call(book, "wereadCoverUrl") ||
+          !Object.prototype.hasOwnProperty.call(book, "manualCoverUrl")),
+    );
+  }
+
   function editedLibraryBookCover(existing, coverUrl) {
     const value = String(coverUrl || "");
     if (!existing || existing.source !== "weread") {
@@ -3727,6 +3746,9 @@
     const books = {};
     Object.entries(state.libraryBooks || {}).forEach(([id, book]) => {
       const normalized = normalizeLibraryBook(book, id, book && book.source);
+      if (normalized && libraryBookNeedsCoverFieldMigration(book)) {
+        normalized.updatedAt = timestampAfter(book && book.updatedAt);
+      }
       if (normalized) books[normalized.id] = normalized;
     });
 
