@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.0
+// @version      0.6.1
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -10,6 +10,8 @@
 // @require      https://cdn.jsdelivr.net/npm/cytoscape@3.34.2/dist/cytoscape.min.js
 // @grant        GM_xmlhttpRequest
 // @connect      workers.dev
+// @connect      res.weread.qq.com
+// @connect      *.tencent-cloud.com
 // ==/UserScript==
 
 (function () {
@@ -869,7 +871,11 @@
       external:
         '<path d="M15 3h6v6"/><path d="m10 14 11-11"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
       fit:
+        '<circle cx="12" cy="12" r="3"/><path d="M12 2v4"/><path d="M12 18v4"/><path d="m4.93 4.93 2.83 2.83"/><path d="m16.24 16.24 2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="m4.93 19.07 2.83-2.83"/><path d="m16.24 7.76 2.83-2.83"/>',
+      fullscreen:
         '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
+      exitFullscreen:
+        '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M16 3v3a2 2 0 0 0 2 2h3"/><path d="M8 21v-3a2 2 0 0 0-2-2H3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>',
       info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
       library:
         '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
@@ -2760,13 +2766,30 @@
         box-shadow: 0 24px 80px rgba(15, 23, 42, .24);
       }
 
+      .wr-topic-graph-card:fullscreen,
+      .wr-topic-graph-card.is-fullscreen {
+        width: 100vw;
+        height: 100vh;
+        max-width: none;
+        max-height: none;
+        border-radius: 0;
+        padding: 20px;
+        background: #fff;
+      }
+
+      .wr-topic-graph-card.is-fullscreen {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+      }
+
       .wr-topic-graph-card * {
         box-sizing: border-box;
       }
 
       .wr-topic-graph-toolbar {
         display: grid;
-        grid-template-columns: minmax(180px, 1fr) 150px 34px 34px;
+        grid-template-columns: minmax(180px, 1fr) 150px 34px 34px 34px;
         gap: 8px;
         margin-top: 15px;
       }
@@ -3172,7 +3195,7 @@
         }
 
         .wr-topic-graph-toolbar {
-          grid-template-columns: minmax(0, 1fr) 126px 34px 34px;
+          grid-template-columns: minmax(0, 1fr) 126px 34px 34px 34px;
         }
 
         .wr-topic-graph-body {
@@ -3339,22 +3362,7 @@
         Object.values(next).find((book) => book.wereadBookId === shelfBook.id) ||
         next[shelfBook.id];
       const id = existing ? existing.id : shelfBook.id;
-      const normalized = normalizeLibraryBook(
-        {
-          ...(existing || {}),
-          id,
-          title: shelfBook.title || (existing && existing.title),
-          author: shelfBook.author || (existing && existing.author),
-          coverUrl: shelfBook.cover || (existing && existing.coverUrl),
-          readerUrl: shelfBook.url || (existing && existing.readerUrl),
-          source: "weread",
-          wereadBookId: shelfBook.id,
-          createdAt: (existing && existing.createdAt) || timestamp,
-          updatedAt: timestamp,
-        },
-        id,
-        "weread",
-      );
+      const normalized = reconcileShelfBook(existing, shelfBook, timestamp);
       const comparableExisting = existing
         ? { ...existing, updatedAt: normalized.updatedAt }
         : null;
@@ -3526,15 +3534,26 @@
           ? id
           : ""),
     );
+    const source = book.source === "weread" || wereadBookId ? "weread" : "manual";
+    const manualCoverUrl = source === "weread" ? String(book.manualCoverUrl || "") : "";
+    const wereadCoverUrl =
+      source === "weread"
+        ? String(
+            book.wereadCoverUrl ||
+              (!manualCoverUrl ? book.coverUrl || book.cover || "" : ""),
+          )
+        : "";
     return {
       id,
       title,
       normalizedTitle: normalizeTitle(title),
       author: String(book.author || "").trim(),
-      coverUrl: String(book.coverUrl || book.cover || ""),
+      coverUrl: String(manualCoverUrl || book.coverUrl || book.cover || wereadCoverUrl || ""),
+      wereadCoverUrl,
+      manualCoverUrl,
       detailUrl: String(book.detailUrl || ""),
       readerUrl: String(book.readerUrl || legacyUrl || ""),
-      source: book.source === "weread" || wereadBookId ? "weread" : "manual",
+      source,
       wereadBookId,
       ignoredWereadBookIds: Array.isArray(book.ignoredWereadBookIds)
         ? [...new Set(book.ignoredWereadBookIds.map(String).filter(Boolean))]
@@ -3542,6 +3561,52 @@
       createdAt: String(book.createdAt || timestamp),
       updatedAt: timestamp,
     };
+  }
+
+  function editedLibraryBookCover(existing, coverUrl) {
+    const value = String(coverUrl || "");
+    if (!existing || existing.source !== "weread") {
+      return { coverUrl: value, wereadCoverUrl: "", manualCoverUrl: "" };
+    }
+    const wereadCoverUrl = String(
+      existing.wereadCoverUrl ||
+        (!existing.manualCoverUrl ? existing.coverUrl || existing.cover || "" : ""),
+    );
+    const manualCoverUrl = value && value !== wereadCoverUrl ? value : "";
+    return {
+      coverUrl: manualCoverUrl || wereadCoverUrl,
+      wereadCoverUrl,
+      manualCoverUrl,
+    };
+  }
+
+  function reconcileShelfBook(existing, shelfBook, timestamp = nowIso()) {
+    const id = existing ? existing.id : shelfBook.id;
+    const manualCoverUrl = String((existing && existing.manualCoverUrl) || "");
+    const wereadCoverUrl = String(
+      shelfBook.cover ||
+        (existing && existing.wereadCoverUrl) ||
+        (existing && !manualCoverUrl ? existing.coverUrl : "") ||
+        "",
+    );
+    return normalizeLibraryBook(
+      {
+        ...(existing || {}),
+        id,
+        title: shelfBook.title || (existing && existing.title),
+        author: shelfBook.author || (existing && existing.author),
+        coverUrl: manualCoverUrl || wereadCoverUrl,
+        wereadCoverUrl,
+        manualCoverUrl,
+        readerUrl: shelfBook.url || (existing && existing.readerUrl),
+        source: "weread",
+        wereadBookId: shelfBook.id,
+        createdAt: (existing && existing.createdAt) || timestamp,
+        updatedAt: timestamp,
+      },
+      id,
+      "weread",
+    );
   }
 
   function libraryBookList() {
@@ -4579,7 +4644,7 @@
         <form class="wr-topic-book-editor-form" data-wr-form="library-book" data-book-id="${escapeHtml(existing ? existing.id : "")}">
           <div class="wr-topic-field"><label for="wr-library-title">书名</label><input id="wr-library-title" class="wr-topic-input" name="title" maxlength="300" value="${escapeHtml(book.title)}" required autocomplete="off"></div>
           <div class="wr-topic-field"><label for="wr-library-author">作者</label><input id="wr-library-author" class="wr-topic-input" name="author" maxlength="300" value="${escapeHtml(book.author)}" autocomplete="off"></div>
-          <div class="wr-topic-field"><label for="wr-library-cover">封面 URL</label><input id="wr-library-cover" class="wr-topic-input" name="coverUrl" type="url" maxlength="2048" value="${escapeHtml(book.coverUrl)}" placeholder="https://..."></div>
+          <div class="wr-topic-field"><label for="wr-library-cover">封面 URL</label><input id="wr-library-cover" class="wr-topic-input" name="coverUrl" type="url" maxlength="2048" value="${escapeHtml(book.coverUrl)}" placeholder="https://...">${existing && existing.source === "weread" ? '<p class="wr-topic-field-hint">手动修改后会优先使用此封面；清空可恢复微信读书封面。</p>' : ""}</div>
           <div class="wr-topic-field"><label for="wr-library-detail">书籍详情 URL</label><input id="wr-library-detail" class="wr-topic-input" name="detailUrl" type="url" maxlength="2048" value="${escapeHtml(book.detailUrl)}" placeholder="https://..."></div>
           <div class="wr-topic-field"><label for="wr-library-reader">阅读入口 URL</label><input id="wr-library-reader" class="wr-topic-input" name="readerUrl" type="url" maxlength="2048" value="${escapeHtml(book.readerUrl)}" placeholder="https://..."></div>
           <div class="wr-topic-modal-actions"><button class="wr-topic-btn" type="button" data-wr-action="close-book-editor">取消</button><button class="wr-topic-btn primary" type="submit">保存</button></div>
@@ -4623,11 +4688,11 @@
   async function saveLibraryBookFromForm(form) {
     const title = form.elements.title.value.trim();
     if (!title) return;
-    let coverUrl;
+    let coverUrlInput;
     let detailUrl;
     let readerUrl;
     try {
-      coverUrl = validateOptionalHttpsUrl(form.elements.coverUrl.value, "封面 URL");
+      coverUrlInput = validateOptionalHttpsUrl(form.elements.coverUrl.value, "封面 URL");
       detailUrl = validateOptionalHttpsUrl(form.elements.detailUrl.value, "书籍详情 URL");
       readerUrl = validateOptionalHttpsUrl(form.elements.readerUrl.value, "阅读入口 URL");
     } catch (error) {
@@ -4643,13 +4708,14 @@
     const id = existing
       ? existing.id
       : `local_${window.crypto && typeof window.crypto.randomUUID === "function" ? window.crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
+    const coverFields = editedLibraryBookCover(existing, coverUrlInput);
     state.libraryBooks[id] = normalizeLibraryBook(
       {
         ...(existing || {}),
         id,
         title,
         author: form.elements.author.value.trim(),
-        coverUrl,
+        ...coverFields,
         detailUrl,
         readerUrl,
         source: existing ? existing.source : "manual",
@@ -5243,7 +5309,7 @@
               <span class="wr-topic-relation-content">
                 <strong title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</strong>
                 <span class="wr-topic-relation-type ${escapeHtml(relation.type)}">${relationTypeLabel(relation.type)}</span>
-                <span class="wr-topic-relation-reason">${escapeHtml(relation.reason)}</span>
+                <span class="wr-topic-relation-reason" title="${escapeHtml(relation.reason)}">${escapeHtml(relation.reason)}</span>
               </span>
             </button>
             <span class="wr-topic-relation-actions">
@@ -5715,7 +5781,7 @@
       group: "nodes",
       data: {
         ...node,
-        image: node.cover || "none",
+        image: node.graphImage || node.cover || "none",
       },
       classes: node.outside ? "outside" : "",
     }));
@@ -5732,6 +5798,76 @@
       classes: relation.type,
     }));
     return [...nodes, ...edges];
+  }
+
+  const graphCoverCache = new Map();
+
+  function requiresGraphCoverProxy(value) {
+    try {
+      const url = new URL(String(value || ""));
+      return (
+        url.protocol === "https:" &&
+        url.hostname === "res.weread.qq.com" &&
+        url.pathname.startsWith("/wrepub/") &&
+        url.pathname.endsWith("_parsecover")
+      );
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function graphCoverDataUrl(url) {
+    if (!requiresGraphCoverProxy(url)) return Promise.resolve(url);
+    if (graphCoverCache.has(url)) return graphCoverCache.get(url);
+    const pending = new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        responseType: "arraybuffer",
+        timeout: 15000,
+        onload(response) {
+          if (
+            response.status < 200 ||
+            response.status >= 300 ||
+            !response.response ||
+            typeof response.response.byteLength !== "number"
+          ) {
+            resolve(url);
+            return;
+          }
+          const contentTypeMatch = String(response.responseHeaders || "").match(
+            /^content-type:\s*([^;\r\n]+)/im,
+          );
+          const responseType = contentTypeMatch ? contentTypeMatch[1].trim() : "";
+          const blob = new Blob([response.response], {
+            type: responseType.startsWith("image/") ? responseType : "image/jpeg",
+          });
+          const reader = new FileReader();
+          reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : url);
+          reader.onerror = () => resolve(url);
+          reader.readAsDataURL(blob);
+        },
+        onerror() {
+          resolve(url);
+        },
+        ontimeout() {
+          resolve(url);
+        },
+      });
+    });
+    graphCoverCache.set(url, pending);
+    return pending;
+  }
+
+  function hydrateGraphCoverImages(graph, nodes) {
+    nodes.forEach((node) => {
+      if (!requiresGraphCoverProxy(node.cover)) return;
+      graphCoverDataUrl(node.cover).then((image) => {
+        if (!image || image === node.cover || state.graph !== graph || graph.destroyed()) return;
+        const element = graph.getElementById(node.id);
+        if (element && element.length) element.data("image", image);
+      });
+    });
   }
 
   function graphInspectorHtml(kind, data) {
@@ -5822,6 +5958,7 @@
         { selector: ".wr-graph-hidden", style: { display: "none" } },
       ],
     });
+    hydrateGraphCoverImages(state.graph, data.nodes);
 
     let lastTap = { id: "", at: 0 };
     state.graph.on("tap", "node", (event) => {
@@ -5873,6 +6010,7 @@
             </select>
             <button class="wr-topic-icon-btn" type="button" data-wr-action="graph-fit" title="适应画布" aria-label="适应画布">${iconSvg("fit")}</button>
             <button class="wr-topic-icon-btn" type="button" data-wr-action="graph-layout" title="重新布局" aria-label="重新布局">${iconSvg("network")}</button>
+            <button class="wr-topic-icon-btn" type="button" data-wr-action="graph-fullscreen" title="全屏查看" aria-label="全屏查看" aria-pressed="false">${iconSvg("fullscreen")}</button>
           </div>
           <div class="wr-topic-graph-body">
             <div class="wr-topic-graph-canvas" data-wr-graph-canvas></div>
@@ -5891,6 +6029,59 @@
     const modal = document.getElementById("wr-topic-graph-modal");
     if (modal) modal.remove();
     state.graphContext = null;
+  }
+
+  function graphCardIsFullscreen(card) {
+    return Boolean(
+      card &&
+        (document.fullscreenElement === card || card.classList.contains("is-fullscreen")),
+    );
+  }
+
+  function updateGraphFullscreenButton() {
+    const card = document.querySelector("#wr-topic-graph-modal .wr-topic-graph-card");
+    const button = document.querySelector('[data-wr-action="graph-fullscreen"]');
+    if (!card || !button) return;
+    const active = graphCardIsFullscreen(card);
+    const label = active ? "退出全屏" : "全屏查看";
+    button.innerHTML = iconSvg(active ? "exitFullscreen" : "fullscreen");
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-pressed", String(active));
+  }
+
+  function refreshGraphViewport() {
+    window.requestAnimationFrame(() => {
+      if (!state.graph) return;
+      state.graph.resize();
+      state.graph.fit(undefined, 36);
+    });
+  }
+
+  async function toggleGraphFullscreen() {
+    const card = document.querySelector("#wr-topic-graph-modal .wr-topic-graph-card");
+    if (!card) return;
+    try {
+      if (document.fullscreenElement === card) {
+        await document.exitFullscreen();
+      } else if (typeof card.requestFullscreen === "function") {
+        await card.requestFullscreen();
+      } else {
+        card.classList.toggle("is-fullscreen");
+        updateGraphFullscreenButton();
+        refreshGraphViewport();
+      }
+    } catch (error) {
+      console.warn("[WeRead Local Topic Shelf] fullscreen unavailable:", error);
+      card.classList.toggle("is-fullscreen");
+      updateGraphFullscreenButton();
+      refreshGraphViewport();
+    }
+  }
+
+  function onGraphFullscreenChange() {
+    updateGraphFullscreenButton();
+    refreshGraphViewport();
   }
 
   function refreshOpenGraph() {
@@ -6043,6 +6234,10 @@
     button.setAttribute("aria-expanded", String(shouldOpen));
   }
 
+  function actionNeedsDefaultPrevention(actionEl) {
+    return !["INPUT", "TEXTAREA", "SELECT", "OPTION"].includes(actionEl.tagName);
+  }
+
   async function onClick(event) {
     if (!isShelfEnhancementRoute()) return;
     const actionEl = event.target.closest("[data-wr-action]");
@@ -6067,7 +6262,7 @@
       actionEl.classList.contains("wr-book-context-icon") ||
       actionEl.classList.contains("wr-topic-shelf-group")
     ) {
-      event.preventDefault();
+      if (actionNeedsDefaultPrevention(actionEl)) event.preventDefault();
       event.stopPropagation();
     }
 
@@ -6244,6 +6439,7 @@
     }
     if (action === "close-graph") closeGraphModal();
     if (action === "graph-fit" && state.graph) state.graph.fit(undefined, 36);
+    if (action === "graph-fullscreen") await toggleGraphFullscreen();
     if (action === "graph-layout" && state.graph && state.graphContext) {
       state.graph.layout(graphLayoutOptions(graphScopeData(state.graphContext))).run();
     }
@@ -6357,8 +6553,10 @@
     document.addEventListener("click", onClick, true);
     document.addEventListener("submit", onSubmit, true);
     document.addEventListener("input", onInput, true);
+    document.addEventListener("search", onInput, true);
     document.addEventListener("change", onChange, true);
     document.addEventListener("keydown", onKeydown, true);
+    document.addEventListener("fullscreenchange", onGraphFullscreenChange, true);
     state.listenersBound = true;
   }
 
