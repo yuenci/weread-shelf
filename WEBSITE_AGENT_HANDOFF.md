@@ -49,6 +49,9 @@
 - 主题组包含名称、描述和书籍 ID 列表。
 - 一本书可以属于主题组，并保留自己的独立上下文和关系。
 - 书籍可以在单个主题组内置顶；多个置顶按 `pinnedBookIds` 顺序显示，新置顶的书排在最前面。
+- 未置顶书籍支持按书名、加入主题组时间、最近编辑、书籍上下文完整度和阅读分级排序，每种模式都支持升序和降序；“取消排序”恢复 `bookIds` 的原始顺序。
+- 任何排序都不能改变置顶区：置顶书始终在最前面，并继续按 `pinnedBookIds` 排列。
+- 主题组列表支持按主题名称、创建时间、最近编辑、书籍数量和上下文完成比例排序；这是本机视图偏好，不改写主题组顺序，也不触发云同步。
 - 组卡片显示“有上下文书籍数 / 组内总书数”。
 - 只要“为什么读这本书”或“阅读问题”任一不为空，就视为有上下文。
 - “移出主题组”只解除成员关系，不删除书籍主档。
@@ -160,6 +163,8 @@ bookIds/pinnedBookIds 对象键     对象键       fromBookId/toBookId
 - `books` 的对象键应等于 `LibraryBook.id`。
 - `groups[].bookIds[]` 引用书籍 ID。
 - `groups[].pinnedBookIds[]` 是 `bookIds` 的有序子集；字段缺失表示没有置顶书籍。
+- `groups[].bookAddedAt` 记录书籍加入该主题组的时间；旧记录可以缺失或为空，排序时未知值始终放在最后。
+- `groups[].sortMode` 取 `title`、`added-at`、`recently-edited`、`context`、`reading-level` 或空字符串；`sortDirection` 取 `asc` 或 `desc`。
 - `notes` 的对象键是书籍 ID。
 - `readingLevels` 的对象键是书籍 ID。
 - `relations[].fromBookId` 和 `toBookId` 引用书籍 ID。

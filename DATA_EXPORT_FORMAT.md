@@ -52,6 +52,7 @@ interface LibraryBook {
   source: BookSource;
   wereadBookId: string;
   ignoredWereadBookIds: string[];
+  lastUserEditedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -63,6 +64,7 @@ interface LibraryBook {
 - `source` 为 `manual` 时代表手动添加的外部书；关联微信读书后会变为 `weread`，但 `id` 可以继续保留原本的本地 ID。
 - `wereadBookId` 为空表示尚未关联微信读书版本。
 - `coverUrl` 是当前实际使用的封面。`manualCoverUrl` 是用户覆盖值，`wereadCoverUrl` 是微信读书来源值。
+- `lastUserEditedAt` 仅在用户手动编辑书籍主档后出现，用于主题组的“最近编辑”排序；自动书架扫描和云端读取不能写入该字段。
 - URL 可以是空字符串；非空时应为 HTTPS。
 
 ## 主题组
@@ -74,12 +76,19 @@ interface TopicGroup {
   description: string;
   bookIds: string[];
   pinnedBookIds?: string[];
+  bookAddedAt?: Record<string, string>;
+  sortMode?: "" | "title" | "added-at" | "recently-edited" | "context" | "reading-level";
+  sortDirection?: "asc" | "desc";
   createdAt: string;
   updatedAt: string;
 }
 ```
 
-`bookIds` 中的每个值引用 `data.books[bookId]`。`pinnedBookIds` 是主题组内置顶书籍的有序子集，数组越靠前，显示位置越靠前；字段缺失等同于空数组。`description` 是主题组描述，不是单本书的阅读上下文。
+`bookIds` 中的每个值引用 `data.books[bookId]`。`pinnedBookIds` 是主题组内置顶书籍的有序子集，数组越靠前，显示位置越靠前；字段缺失等同于空数组。置顶书始终先按 `pinnedBookIds` 显示，排序设置只作用于未置顶书籍。
+
+`bookAddedAt` 的键是组内书籍 ID，值是该书加入本主题组的 ISO 8601 时间。旧数据无法还原真实加入时间时，值为 `""` 或字段缺失；排序时未知值始终放在有记录的值之后。`sortMode` 为空字符串或缺失表示取消排序，恢复未置顶书籍在 `bookIds` 中的顺序。五种非空模式分别代表书名、加入主题组时间、最近编辑、书籍上下文完整度和阅读分级，方向由 `sortDirection` 指定。
+
+`description` 是主题组描述，不是单本书的阅读上下文。
 
 ## 单本书阅读上下文
 

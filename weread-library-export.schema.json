@@ -95,6 +95,7 @@
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true
         },
+        "lastUserEditedAt": { "$ref": "#/$defs/timestamp" },
         "createdAt": { "$ref": "#/$defs/timestamp" },
         "updatedAt": { "$ref": "#/$defs/timestamp" }
       },
@@ -118,6 +119,20 @@
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true
         },
+        "bookAddedAt": {
+          "type": "object",
+          "description": "Per-book topic join timestamps. Empty values represent unknown legacy timestamps.",
+          "additionalProperties": {
+            "oneOf": [
+              { "const": "" },
+              { "$ref": "#/$defs/timestamp" }
+            ]
+          }
+        },
+        "sortMode": {
+          "enum": ["", "title", "added-at", "recently-edited", "context", "reading-level"]
+        },
+        "sortDirection": { "enum": ["asc", "desc"] },
         "createdAt": { "$ref": "#/$defs/timestamp" },
         "updatedAt": { "$ref": "#/$defs/timestamp" }
       },

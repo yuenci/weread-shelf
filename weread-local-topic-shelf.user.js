@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.5
+// @version      0.6.6
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -27,6 +27,7 @@
     cloudConfig: "weread_cloud_sync_config_v1",
     syncMeta: "weread_cloud_sync_meta_v1",
     obsidianCache: "weread_obsidian_catalog_cache_v1",
+    groupListView: "weread_topic_group_list_view_v1",
   };
 
   const DEFAULT_CLOUD_BASE_URL = "";
@@ -34,6 +35,21 @@
   const CLOUD_PUSH_DELAY = 1800;
   const CLOUD_PULL_INTERVAL = 5 * 60 * 1000;
   const READING_LEVELS = new Set(["deep", "light", "casual"]);
+  const GROUP_SORT_MODES = new Set([
+    "title",
+    "added-at",
+    "recently-edited",
+    "context",
+    "reading-level",
+  ]);
+  const GROUP_LIST_SORT_MODES = new Set([
+    "name",
+    "created-at",
+    "recently-edited",
+    "book-count",
+    "context-progress",
+  ]);
+  const GROUP_LIST_SORT_MENU_ID = "__group-list__";
 
   const SELECTORS = {
     shelfList: ".shelf_list",
@@ -96,6 +112,9 @@
     noteDrafts: {},
     graph: null,
     graphContext: null,
+    openGroupSortId: "",
+    groupListSortMode: "",
+    groupListSortDirection: "asc",
     routeActive: false,
   };
 
@@ -303,6 +322,7 @@
     const cloudConfig = await dbGet(STORE.cloudConfig, null);
     const syncMeta = await dbGet(STORE.syncMeta, null);
     const obsidianCache = await dbGet(STORE.obsidianCache, null);
+    const groupListView = await dbGet(STORE.groupListView, null);
 
     if (groups === null) {
       groups = readLegacyLocalStorage(STORE.groups, []);
@@ -389,6 +409,13 @@
         : {}),
       cached: Boolean(obsidianCache),
     };
+    state.groupListSortMode = GROUP_LIST_SORT_MODES.has(
+      groupListView && groupListView.sortMode,
+    )
+      ? groupListView.sortMode
+      : "";
+    state.groupListSortDirection =
+      groupListView && groupListView.sortDirection === "desc" ? "desc" : "asc";
 
     const migrated = await migrateLibraryState();
     if (libraryBooks === null || migrated) {
@@ -772,11 +799,130 @@
     return [...new Set(pinned.map(String).filter((id) => members.has(id)))];
   }
 
+  function groupSortMode(group) {
+    return GROUP_SORT_MODES.has(group && group.sortMode) ? group.sortMode : "";
+  }
+
+  function groupSortDirection(group) {
+    return group && group.sortDirection === "desc" ? "desc" : "asc";
+  }
+
+  function normalizedGroupBookAddedAt(group) {
+    const members = new Set(groupBookIds(group));
+    const source = group && group.bookAddedAt && typeof group.bookAddedAt === "object"
+      ? group.bookAddedAt
+      : {};
+    return Object.fromEntries(
+      Object.entries(source)
+        .filter(([id]) => members.has(id))
+        .map(([id, value]) => [id, String(value || "")]),
+    );
+  }
+
+  function nextGroupBookAddedAt(group, nextBookIds, timestamp) {
+    const previousMembers = new Set(groupBookIds(group));
+    const previous = normalizedGroupBookAddedAt(group);
+    return Object.fromEntries(
+      [...new Set((nextBookIds || []).map(String).filter(Boolean))].map((id) => [
+        id,
+        Object.prototype.hasOwnProperty.call(previous, id)
+          ? previous[id]
+          : previousMembers.has(id)
+            ? ""
+            : String(timestamp || ""),
+      ]),
+    );
+  }
+
+  function remapGroupBookAddedAt(group, fromBookId, toBookId, nextBookIds) {
+    const previous = normalizedGroupBookAddedAt(group);
+    const candidates = [previous[toBookId], previous[fromBookId]].filter(Boolean);
+    const mergedTimestamp = candidates.sort(
+      (left, right) => timestampValue(left) - timestampValue(right),
+    )[0] || "";
+    return Object.fromEntries(
+      nextBookIds.map((id) => [
+        id,
+        id === toBookId ? mergedTimestamp : previous[id] || "",
+      ]),
+    );
+  }
+
+  function bookContextScore(bookId) {
+    const obsidian = getObsidianContext(bookId);
+    const record = hasObsidianReadingContext(obsidian)
+      ? { note: obsidian.context, question: obsidian.question }
+      : state.notes[bookId] || {};
+    return Number(Boolean(String(record.note || "").trim())) +
+      Number(Boolean(String(record.question || "").trim()));
+  }
+
+  function bookRecentlyEditedAt(bookId) {
+    const book = getLibraryBook(bookId) || {};
+    const relationTimes = state.relations
+      .filter(
+        (relation) =>
+          relation.fromBookId === bookId || relation.toBookId === bookId,
+      )
+      .map((relation) => timestampValue(relation.updatedAt));
+    return Math.max(
+      timestampValue(book.lastUserEditedAt),
+      timestampValue(state.notes[bookId] && state.notes[bookId].updatedAt),
+      timestampValue(
+        state.readingLevels[bookId] && state.readingLevels[bookId].updatedAt,
+      ),
+      ...relationTimes,
+      0,
+    );
+  }
+
+  function compareKnownValues(left, right, direction) {
+    const leftKnown = left !== null && left !== undefined && left !== "";
+    const rightKnown = right !== null && right !== undefined && right !== "";
+    if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
+    if (!leftKnown) return 0;
+    const comparison = typeof left === "string"
+      ? left.localeCompare(right, "zh-CN", { numeric: true, sensitivity: "base" })
+      : left - right;
+    return direction === "desc" ? -comparison : comparison;
+  }
+
+  function groupSortValue(bookId, mode, group) {
+    if (mode === "title") return String((findBook(bookId) || {}).title || "");
+    if (mode === "added-at") {
+      const value = normalizedGroupBookAddedAt(group)[bookId];
+      return timestampValue(value) || null;
+    }
+    if (mode === "recently-edited") return bookRecentlyEditedAt(bookId) || null;
+    if (mode === "context") return bookContextScore(bookId);
+    if (mode === "reading-level") {
+      const level = readingLevelForBook(bookId);
+      return { casual: 0, light: 1, deep: 2 }[level] ?? null;
+    }
+    return null;
+  }
+
   function groupBookIdsInDisplayOrder(group) {
     const bookIds = groupBookIds(group);
     const pinnedBookIds = groupPinnedBookIds(group);
     const pinned = new Set(pinnedBookIds);
-    return [...pinnedBookIds, ...bookIds.filter((id) => !pinned.has(id))];
+    const unpinnedBookIds = bookIds.filter((id) => !pinned.has(id));
+    const mode = groupSortMode(group);
+    if (!mode) return [...pinnedBookIds, ...unpinnedBookIds];
+    const direction = groupSortDirection(group);
+    const originalIndex = new Map(bookIds.map((id, index) => [id, index]));
+    const values = new Map(
+      unpinnedBookIds.map((id) => [id, groupSortValue(id, mode, group)]),
+    );
+    unpinnedBookIds.sort((leftId, rightId) => {
+      const comparison = compareKnownValues(
+        values.get(leftId),
+        values.get(rightId),
+        direction,
+      );
+      return comparison || originalIndex.get(leftId) - originalIndex.get(rightId);
+    });
+    return [...pinnedBookIds, ...unpinnedBookIds];
   }
 
   function groupWithBookPin(group, bookId, shouldPin) {
@@ -794,19 +940,38 @@
       (Array.isArray(localGroups) ? localGroups : []).map((group) => [group.id, group]),
     );
     return (Array.isArray(incomingGroups) ? incomingGroups : []).map((group) => {
-      if (
-        !group ||
-        Object.prototype.hasOwnProperty.call(group, "pinnedBookIds")
-      ) {
-        return group;
-      }
+      if (!group) return group;
       const local = localById.get(group.id);
-      if (!local || !groupPinnedBookIds(local).length) return group;
+      if (!local) return group;
       const incomingMembers = new Set(groupBookIds(group));
-      return {
-        ...group,
-        pinnedBookIds: groupPinnedBookIds(local).filter((id) => incomingMembers.has(id)),
-      };
+      const next = { ...group };
+      if (!Object.prototype.hasOwnProperty.call(group, "pinnedBookIds")) {
+        const pinned = groupPinnedBookIds(local).filter((id) => incomingMembers.has(id));
+        if (pinned.length) next.pinnedBookIds = pinned;
+      }
+      if (
+        !Object.prototype.hasOwnProperty.call(group, "bookAddedAt") &&
+        Object.prototype.hasOwnProperty.call(local, "bookAddedAt")
+      ) {
+        next.bookAddedAt = Object.fromEntries(
+          Object.entries(normalizedGroupBookAddedAt(local)).filter(([id]) =>
+            incomingMembers.has(id),
+          ),
+        );
+      }
+      if (
+        !Object.prototype.hasOwnProperty.call(group, "sortMode") &&
+        Object.prototype.hasOwnProperty.call(local, "sortMode")
+      ) {
+        next.sortMode = local.sortMode;
+      }
+      if (
+        !Object.prototype.hasOwnProperty.call(group, "sortDirection") &&
+        Object.prototype.hasOwnProperty.call(local, "sortDirection")
+      ) {
+        next.sortDirection = local.sortDirection;
+      }
+      return next;
     });
   }
 
@@ -824,6 +989,43 @@
       completed: books.filter((book) => bookHasReadingContext(book.id)).length,
       total: books.length,
     };
+  }
+
+  function groupListSortValue(group, mode) {
+    if (mode === "name") return String((group && group.name) || "");
+    if (mode === "created-at") return timestampValue(group && group.createdAt) || null;
+    if (mode === "recently-edited") {
+      return timestampValue(group && group.updatedAt) || null;
+    }
+    if (mode === "book-count") return groupBookIds(group).length;
+    if (mode === "context-progress") {
+      const progress = groupContextProgress(group);
+      return progress.total ? progress.completed / progress.total : null;
+    }
+    return null;
+  }
+
+  function groupsInDisplayOrder(
+    groups,
+    mode = state.groupListSortMode,
+    direction = state.groupListSortDirection,
+  ) {
+    const source = Array.isArray(groups) ? groups : [];
+    const normalizedMode = GROUP_LIST_SORT_MODES.has(mode) ? mode : "";
+    if (!normalizedMode) return [...source];
+    const normalizedDirection = direction === "desc" ? "desc" : "asc";
+    const originalIndex = new Map(source.map((group, index) => [group.id, index]));
+    const values = new Map(
+      source.map((group) => [group.id, groupListSortValue(group, normalizedMode)]),
+    );
+    return [...source].sort((left, right) => {
+      const comparison = compareKnownValues(
+        values.get(left.id),
+        values.get(right.id),
+        normalizedDirection,
+      );
+      return comparison || originalIndex.get(left.id) - originalIndex.get(right.id);
+    });
   }
 
   function isShelfEnhancementRoute(pathname = window.location.pathname) {
@@ -1002,6 +1204,10 @@
         '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
       pin:
         '<path d="M12 17v5"/><path d="M5 17h14"/><path d="M6 17v-5a6 6 0 0 1 12 0v5"/><path d="M9 10V2h6v8"/>',
+      arrowUpDown:
+        '<path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/>',
+      arrowUp: '<path d="m18 15-6-6-6 6"/>',
+      arrowDown: '<path d="m6 9 6 6 6-6"/>',
       bookOpen:
         '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3Z"/><path d="M21 18a1 1 0 0 0 1-1V5a2 2 0 0 0-2-2h-5a3 3 0 0 0-3 3v15a3 3 0 0 1 3-3Z"/>',
       check: '<path d="m20 6-11 11-5-5"/>',
@@ -1463,9 +1669,18 @@
         font-size: 13px;
       }
 
-      .wr-topic-sidebar > h3 {
+      .wr-topic-sidebar-title-row {
         flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
         margin-bottom: 12px;
+      }
+
+      .wr-topic-sidebar-title-row > h3 {
+        min-width: 0;
+        margin: 0;
       }
 
       .wr-topic-group-scroll {
@@ -2121,9 +2336,17 @@
       }
 
       .wr-topic-detail-actions {
+        position: relative;
+        z-index: 6;
+        flex: 0 0 auto;
         display: flex;
         align-items: center;
         gap: 8px;
+      }
+
+      .wr-topic-detail-head > h3 {
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
 
       .wr-topic-detail-icon-btn {
@@ -2141,6 +2364,65 @@
       .wr-topic-detail-icon-btn .wr-topic-icon {
         width: 15px;
         height: 15px;
+      }
+
+      .wr-topic-detail-icon-btn.active {
+        border-color: rgba(47, 128, 237, .42);
+        background: #eef6ff;
+        color: var(--wr-topic-blue);
+      }
+
+      .wr-topic-group-sort {
+        position: relative;
+        z-index: 7;
+      }
+
+      .wr-topic-group-sort-menu {
+        position: absolute;
+        top: 36px;
+        right: 0;
+        z-index: 12;
+        width: 208px;
+        border: 1px solid var(--wr-topic-border);
+        border-radius: 6px;
+        padding: 6px;
+        background: #fff;
+        box-shadow: 0 12px 32px rgba(15, 23, 42, .16);
+      }
+
+      .wr-topic-group-sort-menu[hidden] {
+        display: none;
+      }
+
+      .wr-topic-group-sort-label {
+        display: block;
+        padding: 5px 8px;
+        color: var(--wr-topic-muted);
+        font-size: 11px;
+      }
+
+      .wr-topic-group-sort-direction {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 5px;
+        margin-top: 5px;
+        padding-top: 6px;
+        border-top: 1px solid var(--wr-topic-border);
+      }
+
+      .wr-topic-group-sort-direction .wr-topic-book-menu-item {
+        justify-content: center;
+      }
+
+      .wr-topic-group-sort-direction .wr-topic-book-menu-item.active {
+        background: #eef6ff;
+        color: var(--wr-topic-blue);
+      }
+
+      .wr-topic-group-sort-cancel {
+        margin-top: 5px;
+        border-top: 1px solid var(--wr-topic-border);
+        padding-top: 5px;
       }
 
       .wr-topic-book-row {
@@ -3695,7 +3977,7 @@
               (!manualCoverUrl ? book.coverUrl || book.cover || "" : ""),
           )
         : "";
-    return {
+    const normalized = {
       id,
       title,
       normalizedTitle: normalizeTitle(title),
@@ -3713,6 +3995,10 @@
       createdAt: String(book.createdAt || timestamp),
       updatedAt: timestamp,
     };
+    if (book.lastUserEditedAt) {
+      normalized.lastUserEditedAt = String(book.lastUserEditedAt);
+    }
+    return normalized;
   }
 
   function libraryBookNeedsCoverFieldMigration(book) {
@@ -3987,6 +4273,15 @@
       const migrated = { ...group, bookIds: [...new Set(bookIds)] };
       if (Array.isArray(group.pinnedBookIds)) {
         migrated.pinnedBookIds = groupPinnedBookIds(migrated);
+      }
+      if (group.bookAddedAt && typeof group.bookAddedAt === "object") {
+        migrated.bookAddedAt = nextGroupBookAddedAt(group, migrated.bookIds, "");
+      }
+      if (Object.prototype.hasOwnProperty.call(group, "sortMode")) {
+        migrated.sortMode = groupSortMode(group);
+      }
+      if (Object.prototype.hasOwnProperty.call(group, "sortDirection")) {
+        migrated.sortDirection = groupSortDirection(group);
       }
       delete migrated.books;
       return migrated;
@@ -4281,6 +4576,7 @@
     state.noteNavigationStack = [];
     state.noteDrafts = {};
     state.graphContext = null;
+    state.openGroupSortId = "";
   }
 
   function refreshShelf() {
@@ -4386,9 +4682,11 @@
       return `<div class="wr-topic-empty">${text.noGroups}</div>`;
     }
 
+    const displayGroups = groupsInDisplayOrder(groups);
+
     return `
       <div class="wr-topic-group-list">
-        ${groups
+        ${displayGroups
           .map((group) => {
             const progress = groupContextProgress(group);
             return `
@@ -4446,6 +4744,88 @@
       </div>`;
   }
 
+  function groupSortMenuHtml(group) {
+    const mode = groupSortMode(group);
+    const direction = groupSortDirection(group);
+    const isOpen = state.openGroupSortId === group.id;
+    const sortItems = [
+      ["title", "书名"],
+      ["added-at", "加入主题组时间"],
+      ["recently-edited", "最近编辑"],
+      ["context", "书籍上下文"],
+      ["reading-level", "阅读分级"],
+    ]
+      .map(
+        ([value, label]) => `
+          <button class="wr-topic-book-menu-item" type="button" role="menuitemradio" aria-checked="${mode === value}" data-wr-action="set-group-sort" data-group-id="${escapeHtml(group.id)}" data-sort-mode="${value}">
+            <span>${label}</span>
+            ${mode === value ? iconSvg("check") : ""}
+          </button>`,
+      )
+      .join("");
+    return `
+      <div class="wr-topic-group-sort">
+        <button class="wr-topic-btn wr-topic-detail-icon-btn${mode ? " active" : ""}" type="button" data-wr-action="toggle-group-sort" data-group-id="${escapeHtml(group.id)}" title="${mode ? "调整书籍排序" : "书籍排序"}" aria-label="${mode ? "调整书籍排序" : "书籍排序"}" aria-haspopup="menu" aria-expanded="${isOpen}">${iconSvg("arrowUpDown")}</button>
+        <div class="wr-topic-group-sort-menu" data-wr-group-sort-menu role="menu" ${isOpen ? "" : "hidden"}>
+          <span class="wr-topic-group-sort-label">排序方式</span>
+          ${sortItems}
+          ${
+            mode
+              ? `<div class="wr-topic-group-sort-direction" role="group" aria-label="排序方向">
+                  <button class="wr-topic-book-menu-item ${direction === "asc" ? "active" : ""}" type="button" data-wr-action="set-group-sort-direction" data-group-id="${escapeHtml(group.id)}" data-sort-direction="asc" aria-pressed="${direction === "asc"}">${iconSvg("arrowUp")}<span>升序</span></button>
+                  <button class="wr-topic-book-menu-item ${direction === "desc" ? "active" : ""}" type="button" data-wr-action="set-group-sort-direction" data-group-id="${escapeHtml(group.id)}" data-sort-direction="desc" aria-pressed="${direction === "desc"}">${iconSvg("arrowDown")}<span>降序</span></button>
+                </div>
+                <div class="wr-topic-group-sort-cancel">
+                  <button class="wr-topic-book-menu-item" type="button" data-wr-action="cancel-group-sort" data-group-id="${escapeHtml(group.id)}"><span>取消排序</span>${iconSvg("x")}</button>
+                </div>`
+              : ""
+          }
+        </div>
+      </div>`;
+  }
+
+  function groupListSortMenuHtml() {
+    const mode = GROUP_LIST_SORT_MODES.has(state.groupListSortMode)
+      ? state.groupListSortMode
+      : "";
+    const direction = state.groupListSortDirection === "desc" ? "desc" : "asc";
+    const isOpen = state.openGroupSortId === GROUP_LIST_SORT_MENU_ID;
+    const sortItems = [
+      ["name", "主题名称"],
+      ["created-at", "创建时间"],
+      ["recently-edited", "最近编辑"],
+      ["book-count", "书籍数量"],
+      ["context-progress", "上下文完整度"],
+    ]
+      .map(
+        ([value, label]) => `
+          <button class="wr-topic-book-menu-item" type="button" role="menuitemradio" aria-checked="${mode === value}" data-wr-action="set-group-list-sort" data-sort-mode="${value}">
+            <span>${label}</span>
+            ${mode === value ? iconSvg("check") : ""}
+          </button>`,
+      )
+      .join("");
+    return `
+      <div class="wr-topic-group-sort wr-topic-group-list-sort">
+        <button class="wr-topic-btn wr-topic-detail-icon-btn${mode ? " active" : ""}" type="button" data-wr-action="toggle-group-list-sort" data-group-id="${GROUP_LIST_SORT_MENU_ID}" title="${mode ? "调整主题组排序" : "主题组排序"}" aria-label="${mode ? "调整主题组排序" : "主题组排序"}" aria-haspopup="menu" aria-expanded="${isOpen}">${iconSvg("arrowUpDown")}</button>
+        <div class="wr-topic-group-sort-menu" data-wr-group-sort-menu role="menu" ${isOpen ? "" : "hidden"}>
+          <span class="wr-topic-group-sort-label">排序方式</span>
+          ${sortItems}
+          ${
+            mode
+              ? `<div class="wr-topic-group-sort-direction" role="group" aria-label="排序方向">
+                  <button class="wr-topic-book-menu-item ${direction === "asc" ? "active" : ""}" type="button" data-wr-action="set-group-list-sort-direction" data-sort-direction="asc" aria-pressed="${direction === "asc"}">${iconSvg("arrowUp")}<span>升序</span></button>
+                  <button class="wr-topic-book-menu-item ${direction === "desc" ? "active" : ""}" type="button" data-wr-action="set-group-list-sort-direction" data-sort-direction="desc" aria-pressed="${direction === "desc"}">${iconSvg("arrowDown")}<span>降序</span></button>
+                </div>
+                <div class="wr-topic-group-sort-cancel">
+                  <button class="wr-topic-book-menu-item" type="button" data-wr-action="cancel-group-list-sort"><span>取消排序</span>${iconSvg("x")}</button>
+                </div>`
+              : ""
+          }
+        </div>
+      </div>`;
+  }
+
   function renderGroupDetail(group) {
     if (state.formMode === "new") return renderGroupForm(null);
     if (state.formMode === "edit" && group) return renderGroupForm(group);
@@ -4458,6 +4838,7 @@
       <div class="wr-topic-detail-head">
         <h3>${escapeHtml(group.name)}</h3>
         <div class="wr-topic-detail-actions">
+          ${groupSortMenuHtml(group)}
           <button class="wr-topic-btn wr-topic-detail-icon-btn" type="button" data-wr-action="open-graph" data-scope="group" data-group-id="${escapeHtml(group.id)}" title="查看主题组关系" aria-label="查看主题组关系">${iconSvg("network")}</button>
           <button class="wr-topic-btn wr-topic-detail-icon-btn" type="button" data-wr-action="edit-group" data-group-id="${escapeHtml(group.id)}" title="${text.edit}" aria-label="${text.edit}">${iconSvg("edit")}</button>
           <button class="wr-topic-btn danger wr-topic-detail-icon-btn" type="button" data-wr-action="delete-group" data-group-id="${escapeHtml(group.id)}" title="${text.deleteGroup}" aria-label="${text.deleteGroup}">${iconSvg("trash")}</button>
@@ -4896,6 +5277,7 @@
         readerUrl,
         source: existing ? existing.source : "manual",
         createdAt: (existing && existing.createdAt) || timestamp,
+        lastUserEditedAt: timestamp,
         updatedAt: timestamp,
       },
       id,
@@ -4938,12 +5320,16 @@
     const timestamp = nowIso();
     state.groups = state.groups.map((group) =>
       (group.bookIds || []).includes(bookId)
-        ? {
-            ...group,
-            bookIds: group.bookIds.filter((id) => id !== bookId),
-            pinnedBookIds: groupPinnedBookIds(group).filter((id) => id !== bookId),
-            updatedAt: timestamp,
-          }
+        ? (() => {
+            const bookIds = group.bookIds.filter((id) => id !== bookId);
+            return {
+              ...group,
+              bookIds,
+              pinnedBookIds: groupPinnedBookIds(group).filter((id) => id !== bookId),
+              bookAddedAt: nextGroupBookAddedAt(group, bookIds, timestamp),
+              updatedAt: timestamp,
+            };
+          })()
         : group,
     );
     if (state.notes[bookId]) {
@@ -5038,6 +5424,7 @@
         readerUrl: weread.readerUrl || manual.readerUrl,
         source: "weread",
         wereadBookId: weread.wereadBookId,
+        lastUserEditedAt: timestamp,
         updatedAt: timestamp,
       },
       manualId,
@@ -5047,6 +5434,7 @@
 
     state.groups = state.groups.map((group) => {
       const ids = (group.bookIds || []).map((id) => (id === wereadId ? manualId : id));
+      const bookIds = [...new Set(ids)];
       const pins = groupPinnedBookIds(group).map((id) =>
         id === wereadId ? manualId : id,
       );
@@ -5057,8 +5445,14 @@
       return changed || pinsChanged
         ? {
             ...group,
-            bookIds: [...new Set(ids)],
+            bookIds,
             pinnedBookIds: [...new Set(pins)],
+            bookAddedAt: remapGroupBookAddedAt(
+              group,
+              wereadId,
+              manualId,
+              bookIds,
+            ),
             updatedAt: timestamp,
           }
         : group;
@@ -5326,7 +5720,10 @@
                 : `<div class="wr-topic-panel-body">
                   <section class="wr-topic-sidebar">
                     <div class="wr-topic-count">微信书架 ${state.books.length} 本 · 本地书库 ${libraryBookList().length} 本</div>
-                    <h3>${text.groups}</h3>
+                    <div class="wr-topic-sidebar-title-row">
+                      <h3>${text.groups}</h3>
+                      ${groupListSortMenuHtml()}
+                    </div>
                     <div class="wr-topic-group-scroll">
                       ${renderGroupList(groups)}
                     </div>
@@ -5391,6 +5788,7 @@
     if (root) root.remove();
     state.formMode = "";
     state.editingGroupId = "";
+    state.openGroupSortId = "";
   }
 
   function updateBookPicker() {
@@ -5419,12 +5817,14 @@
     if (state.formMode === "edit") {
       const group = groups.find((item) => item.id === state.editingGroupId);
       if (!group) return;
+      const bookAddedAt = nextGroupBookAddedAt(group, bookIds, now);
       group.name = name;
       group.description = description;
       group.bookIds = bookIds;
       group.pinnedBookIds = groupPinnedBookIds(group).filter((id) =>
         bookIds.includes(id),
       );
+      group.bookAddedAt = bookAddedAt;
       group.updatedAt = now;
       state.selectedGroupId = group.id;
     } else {
@@ -5434,6 +5834,9 @@
         description,
         bookIds,
         pinnedBookIds: [],
+        bookAddedAt: Object.fromEntries(bookIds.map((id) => [id, now])),
+        sortMode: "",
+        sortDirection: "asc",
         createdAt: now,
         updatedAt: now,
       };
@@ -5452,7 +5855,9 @@
     const group = groups.find((item) => item.id === groupId);
     if (!group) return;
 
-    group.bookIds = (group.bookIds || []).filter((id) => id !== bookId);
+    const bookIds = (group.bookIds || []).filter((id) => id !== bookId);
+    group.bookAddedAt = nextGroupBookAddedAt(group, bookIds, nowIso());
+    group.bookIds = bookIds;
     group.pinnedBookIds = groupPinnedBookIds(group).filter((id) => id !== bookId);
     group.updatedAt = new Date().toISOString();
 
@@ -5483,6 +5888,68 @@
     group.updatedAt = nowIso();
     await saveGroups(groups);
     closeBookMenus();
+    renderPanel();
+  }
+
+  async function updateGroupSort(
+    groupId,
+    { mode, direction, cancel = false } = {},
+  ) {
+    const groups = getGroups();
+    const group = groups.find((item) => item.id === groupId);
+    if (!group) return;
+    const nextMode = cancel
+      ? ""
+      : mode === undefined
+        ? groupSortMode(group)
+        : GROUP_SORT_MODES.has(mode)
+          ? mode
+          : "";
+    const nextDirection = direction === "desc"
+      ? "desc"
+      : direction === "asc"
+        ? "asc"
+        : groupSortDirection(group);
+    if (
+      groupSortMode(group) !== nextMode ||
+      groupSortDirection(group) !== nextDirection
+    ) {
+      group.sortMode = nextMode;
+      group.sortDirection = nextDirection;
+      group.updatedAt = nowIso();
+      await saveGroups(groups);
+    }
+    state.openGroupSortId = cancel ? "" : groupId;
+    renderPanel();
+  }
+
+  async function updateGroupListSort(
+    { mode, direction, cancel = false } = {},
+  ) {
+    const nextMode = cancel
+      ? ""
+      : mode === undefined
+        ? state.groupListSortMode
+        : GROUP_LIST_SORT_MODES.has(mode)
+          ? mode
+          : "";
+    const nextDirection = direction === "desc"
+      ? "desc"
+      : direction === "asc"
+        ? "asc"
+        : state.groupListSortDirection;
+    if (
+      state.groupListSortMode !== nextMode ||
+      state.groupListSortDirection !== nextDirection
+    ) {
+      state.groupListSortMode = nextMode;
+      state.groupListSortDirection = nextDirection;
+      await dbSet(STORE.groupListView, {
+        sortMode: nextMode,
+        sortDirection: nextDirection,
+      });
+    }
+    state.openGroupSortId = cancel ? "" : GROUP_LIST_SORT_MENU_ID;
     renderPanel();
   }
 
@@ -6425,6 +6892,19 @@
     });
   }
 
+  function closeGroupSortMenus(exceptRoot = null) {
+    document.querySelectorAll(".wr-topic-group-sort").forEach((root) => {
+      if (root === exceptRoot) return;
+      const menu = root.querySelector("[data-wr-group-sort-menu]");
+      const button = root.querySelector(
+        '[data-wr-action="toggle-group-sort"], [data-wr-action="toggle-group-list-sort"]',
+      );
+      if (menu) menu.hidden = true;
+      if (button) button.setAttribute("aria-expanded", "false");
+    });
+    if (!exceptRoot) state.openGroupSortId = "";
+  }
+
   function toggleBookMenu(button) {
     const root = button.closest(".wr-topic-group-book-menu");
     const menu = root && root.querySelector("[data-wr-book-menu]");
@@ -6433,6 +6913,19 @@
     closeBookMenus(root);
     menu.hidden = !shouldOpen;
     button.setAttribute("aria-expanded", String(shouldOpen));
+  }
+
+  function toggleGroupSortMenu(button) {
+    const root = button.closest(".wr-topic-group-sort");
+    const menu = root && root.querySelector("[data-wr-group-sort-menu]");
+    if (!root || !menu) return;
+    const shouldOpen = menu.hidden;
+    closeGroupSortMenus(root);
+    menu.hidden = !shouldOpen;
+    button.setAttribute("aria-expanded", String(shouldOpen));
+    state.openGroupSortId = shouldOpen
+      ? button.dataset.groupId || state.selectedGroupId
+      : "";
   }
 
   function toggleLevelSubmenu(button) {
@@ -6453,10 +6946,12 @@
     const actionEl = event.target.closest("[data-wr-action]");
     if (!actionEl) {
       closeBookMenus();
+      closeGroupSortMenus();
       return;
     }
 
     if (!actionEl.closest(".wr-topic-group-book-menu")) closeBookMenus();
+    if (!actionEl.closest(".wr-topic-group-sort")) closeGroupSortMenus();
 
     const action = actionEl.dataset.wrAction;
 
@@ -6581,6 +7076,30 @@
       if (form) form.requestSubmit();
     }
     if (action === "delete-group") await deleteGroup(actionEl.dataset.groupId);
+    if (action === "toggle-group-sort") toggleGroupSortMenu(actionEl);
+    if (action === "set-group-sort") {
+      await updateGroupSort(actionEl.dataset.groupId, {
+        mode: actionEl.dataset.sortMode,
+      });
+    }
+    if (action === "set-group-sort-direction") {
+      await updateGroupSort(actionEl.dataset.groupId, {
+        direction: actionEl.dataset.sortDirection,
+      });
+    }
+    if (action === "cancel-group-sort") {
+      await updateGroupSort(actionEl.dataset.groupId, { cancel: true });
+    }
+    if (action === "toggle-group-list-sort") toggleGroupSortMenu(actionEl);
+    if (action === "set-group-list-sort") {
+      await updateGroupListSort({ mode: actionEl.dataset.sortMode });
+    }
+    if (action === "set-group-list-sort-direction") {
+      await updateGroupListSort({ direction: actionEl.dataset.sortDirection });
+    }
+    if (action === "cancel-group-list-sort") {
+      await updateGroupListSort({ cancel: true });
+    }
     if (action === "toggle-book-menu") toggleBookMenu(actionEl);
     if (action === "toggle-book-pin") {
       await setBookPinned(
