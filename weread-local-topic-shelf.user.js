@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.7
+// @version      0.6.8
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -6590,9 +6590,17 @@
     if (inspector) inspector.innerHTML = graphInspectorHtml(kind, data);
   }
 
+  function removeGraphLoadingIndicator(container) {
+    const indicator = container && container.querySelector("[data-wr-graph-loading]");
+    if (!indicator) return false;
+    indicator.remove();
+    return true;
+  }
+
   function initializeGraph(data) {
     const container = document.querySelector("[data-wr-graph-canvas]");
     if (!container) return;
+    removeGraphLoadingIndicator(container);
     const cytoscapeFactory = window.cytoscape;
     if (typeof cytoscapeFactory !== "function") {
       container.innerHTML = '<div class="wr-topic-graph-error">关系图库未能加载。书籍上下文中的关系卡片仍可正常使用。</div>';
@@ -6702,7 +6710,7 @@
             <button class="wr-topic-icon-btn" type="button" data-wr-action="graph-fullscreen" title="全屏查看" aria-label="全屏查看" aria-pressed="false">${iconSvg("fullscreen")}</button>
           </div>
           <div class="wr-topic-graph-body">
-            <div class="wr-topic-graph-canvas" data-wr-graph-canvas><div class="wr-topic-graph-error">正在加载封面...</div></div>
+            <div class="wr-topic-graph-canvas" data-wr-graph-canvas><div class="wr-topic-graph-error wr-topic-graph-loading" data-wr-graph-loading>正在加载封面...</div></div>
             <aside class="wr-topic-graph-inspector" data-wr-graph-inspector><p>选择一本书或一条关系查看详情。</p></aside>
           </div>` : '<div class="wr-topic-graph-empty">这个范围内还没有阅读关系。</div>'}
       </div>`;
