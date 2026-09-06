@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.6
+// @version      0.6.7
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -6486,7 +6486,8 @@
       const url = new URL(String(value || ""));
       return (
         url.protocol === "https:" &&
-        ["res.weread.qq.com", "cdn.weread.qq.com"].includes(url.hostname)
+        url.hostname === "res.weread.qq.com" &&
+        /(?:_|\/)parsecover$/i.test(url.pathname)
       );
     } catch (error) {
       return false;
@@ -6533,18 +6534,31 @@
       });
     });
     graphCoverCache.set(url, pending);
+    pending.then((image) => {
+      if (!image || image === url) {
+        graphCoverCache.delete(url);
+      } else {
+        graphCoverCache.set(url, Promise.resolve(image));
+      }
+    });
     return pending;
   }
 
-  function hydrateGraphCoverImages(graph, nodes) {
-    nodes.forEach((node) => {
-      if (!requiresGraphCoverProxy(node.cover)) return;
-      graphCoverDataUrl(node.cover).then((image) => {
-        if (!image || image === node.cover || state.graph !== graph || graph.destroyed()) return;
-        const element = graph.getElementById(node.id);
-        if (element && element.length) element.data("image", image);
-      });
-    });
+  async function preloadGraphCoverImages(data, loader = graphCoverDataUrl) {
+    const nodes = await Promise.all(
+      data.nodes.map(async (node) => {
+        if (!requiresGraphCoverProxy(node.cover)) return node;
+        try {
+          const graphImage = await loader(node.cover);
+          return graphImage && graphImage !== node.cover
+            ? { ...node, graphImage }
+            : node;
+        } catch (error) {
+          return node;
+        }
+      }),
+    );
+    return { ...data, nodes };
   }
 
   function graphInspectorHtml(kind, data) {
@@ -6635,8 +6649,6 @@
         { selector: ".wr-graph-hidden", style: { display: "none" } },
       ],
     });
-    hydrateGraphCoverImages(state.graph, data.nodes);
-
     let lastTap = { id: "", at: 0 };
     state.graph.on("tap", "node", (event) => {
       const node = event.target;
@@ -6690,12 +6702,23 @@
             <button class="wr-topic-icon-btn" type="button" data-wr-action="graph-fullscreen" title="全屏查看" aria-label="全屏查看" aria-pressed="false">${iconSvg("fullscreen")}</button>
           </div>
           <div class="wr-topic-graph-body">
-            <div class="wr-topic-graph-canvas" data-wr-graph-canvas></div>
+            <div class="wr-topic-graph-canvas" data-wr-graph-canvas><div class="wr-topic-graph-error">正在加载封面...</div></div>
             <aside class="wr-topic-graph-inspector" data-wr-graph-inspector><p>选择一本书或一条关系查看详情。</p></aside>
           </div>` : '<div class="wr-topic-graph-empty">这个范围内还没有阅读关系。</div>'}
       </div>`;
     if (!safeAppend(getMountRoot(), modal, "graph modal")) return;
-    if (data.relations.length) window.setTimeout(() => initializeGraph(data), 0);
+    if (data.relations.length) {
+      window.setTimeout(async () => {
+        const preparedData = await preloadGraphCoverImages(data);
+        if (
+          !modal.isConnected ||
+          document.getElementById("wr-topic-graph-modal") !== modal
+        ) {
+          return;
+        }
+        initializeGraph(preparedData);
+      }, 0);
+    }
   }
 
   function closeGraphModal() {
