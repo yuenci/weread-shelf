@@ -42,6 +42,7 @@ type BookSource = "weread" | "manual";
 interface LibraryBook {
   id: string;
   title: string;
+  displayTitle?: string;
   normalizedTitle: string;
   author: string;
   coverUrl: string;
@@ -60,7 +61,8 @@ interface LibraryBook {
 
 - `books` 的对象键必须等于对应记录的 `id`。
 - `id` 是本地稳定主键。外部书通常以 `local_` 开头，但解析器不应依赖此前缀。
-- `normalizedTitle` 仅用于搜索和候选匹配。显示时使用 `title`，不要按标题自动合并书籍。
+- `normalizedTitle` 仅用于搜索和候选匹配，始终由原始 `title` 生成，不要按标题自动合并书籍。
+- `displayTitle` 是可选显示书名。非空时优先用于界面展示；它不改变原始 `title`、书籍 ID 或候选匹配。旧版记录没有此字段时继续使用原始书名。
 - `source` 为 `manual` 时代表手动添加的外部书；关联微信读书后会变为 `weread`，但 `id` 可以继续保留原本的本地 ID。
 - `wereadBookId` 为空表示尚未关联微信读书版本。
 - `coverUrl` 是当前实际使用的封面。`manualCoverUrl` 是用户覆盖值，`wereadCoverUrl` 是微信读书来源值。

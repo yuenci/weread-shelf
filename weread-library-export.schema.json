@@ -81,6 +81,7 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "displayTitle": { "type": "string", "maxLength": 300 },
         "normalizedTitle": { "type": "string", "minLength": 1, "maxLength": 300 },
         "author": { "type": "string", "maxLength": 300 },
         "coverUrl": { "$ref": "#/$defs/optionalHttpsUrl" },

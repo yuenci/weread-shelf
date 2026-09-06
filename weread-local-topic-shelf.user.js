@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.7.0
+// @version      0.8.0
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -91,6 +91,7 @@
     cloudPushTimer: 0,
     lastCloudPullAt: 0,
     panelTab: "groups",
+    workspaceWide: false,
     catalogFilter: "in",
     catalogQuery: "",
     levelFilter: "all",
@@ -112,6 +113,9 @@
     noteDrafts: {},
     graph: null,
     graphContext: null,
+    graphView: "graph",
+    graphQuery: "",
+    graphType: "all",
     openGroupSortId: "",
     groupListSortMode: "",
     groupListSortDirection: "asc",
@@ -140,7 +144,7 @@
     edit: "编辑",
     deleteGroup: "删除主题",
     remove: "移除",
-    note: "描述",
+    note: "查看阅读上下文",
     openReader: "进入阅读",
     bookNoteTitle: "书籍阅读上下文",
     whyRead: "我为什么读这本书？它在我的思想地图里承担什么角色？",
@@ -3666,6 +3670,65 @@
         }
       }
 
+      .wr-topic-panel-header { position: relative; }
+      .wr-topic-tabs { padding-right: 145px; }
+      .wr-topic-workspace-toggle { position: absolute; right: 26px; bottom: 9px; font-size: 12px; }
+      .wr-topic-panel.is-wide { width: min(1600px, calc(100vw - 40px)); }
+      .wr-topic-edition { display: inline-block; margin: 3px 0 0 6px; padding: 1px 5px; border-radius: 4px; color: #476383; background: #edf3f9; font-size: 11px; font-weight: 400; vertical-align: middle; }
+      .wr-topic-group-book-list { grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); align-items: start; }
+      .wr-topic-group-book-card { height: auto; min-height: 210px; }
+      .wr-topic-group-book-content { height: auto; min-height: 184px; overflow: visible; }
+      .wr-topic-group-book-title-action { font-size: 15px; line-height: 1.5; -webkit-line-clamp: 2; word-break: normal; overflow-wrap: anywhere; }
+      .wr-topic-group-book-context { flex: 0 0 auto; -webkit-line-clamp: 3; font-size: 13px; line-height: 1.65; color: #435064; }
+      .wr-topic-group-book-context.is-empty { color: #63758b; font-size: 12px; }
+      .wr-topic-group-book-card.is-expanded .wr-topic-group-book-context { display: block; -webkit-line-clamp: unset; }
+      .wr-topic-card-reading-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: auto; padding-top: 10px; }
+      .wr-topic-card-reading-actions .wr-topic-direct-reader { margin-left: auto; }
+      .wr-topic-direct-reader { font-size: 12px; padding: 5px 8px; color: #2165ad; border-color: #d2e2f5; white-space: nowrap; }
+      .wr-topic-library-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+      .wr-topic-library-card-actions .wr-topic-direct-reader { flex-basis: 100%; }
+      .wr-topic-library-title, .wr-topic-graded-title { font-size: 15px; line-height: 1.5; }
+      .wr-topic-library-context, .wr-topic-graded-context { font-size: 13px; line-height: 1.65; color: #435064; -webkit-line-clamp: 3; }
+      .wr-topic-graded-card { display: flex; flex-direction: column; gap: 10px; }
+      .wr-topic-graded-main { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 12px; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; color: inherit; }
+      .wr-topic-graded-card > .wr-topic-direct-reader { align-self: flex-end; margin-top: auto; }
+      .wr-topic-workspace-layer { position: relative; inset: auto; z-index: auto; display: flex; flex: 1; min-height: 0; width: 100%; padding: 0; background: transparent; }
+      .wr-topic-workspace-layer > .wr-topic-modal-card,
+      .wr-topic-workspace-layer > .wr-topic-graph-card { width: 100%; height: 100%; max-width: none; max-height: none; box-shadow: none; border-radius: 0; padding: 8px; }
+      .has-workspace-note > :not(#wr-topic-note-modal):not(#wr-topic-graph-modal),
+      .has-workspace-graph > :not(#wr-topic-graph-modal) { display: none !important; }
+      .has-workspace-note, .has-workspace-graph { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+      .wr-topic-workspace-layer [data-wr-action="close-graph"] { width: auto; }
+      .wr-topic-graph-navigation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+      .wr-topic-graph-navigation label { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; font-size: 13px; }
+      .wr-topic-graph-navigation select { width: min(320px, 50vw); }
+      .wr-topic-graph-navigation [aria-pressed="true"] { color: #2165ad; border-color: #91b7e8; background: #f0f6ff; }
+      .wr-topic-graph-summary { margin: 8px 0; font-size: 12px; color: #526070; }
+      .wr-topic-graph-list { min-height: 0; overflow-y: auto; padding: 2px 8px 10px 0; }
+      .wr-topic-graph-canvas[hidden], .wr-topic-graph-list[hidden] { display: none !important; }
+      .wr-topic-graph-canvas { min-height: 0; }
+      .wr-topic-graph-relation-row { display: block; width: 100%; padding: 14px; margin: 0 0 10px; text-align: left; border: 1px solid #dde4ee; border-radius: 8px; background: #fff; color: #28374b; font-size: 14px; }
+      .wr-topic-graph-relation-row:hover, .wr-topic-graph-relation-row:focus-visible { border-color: #6d9fdc; background: #f8fbff; }
+      .wr-topic-graph-reason { display: block; margin-top: 9px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .wr-topic-graph-inspector .wr-topic-graph-relation-row { font-size: 13px; padding: 10px; }
+      .wr-topic-graph-inspector p { font-size: 14px; line-height: 1.7; white-space: pre-wrap; }
+      .wr-topic-graph-card { width: min(1320px, calc(100vw - 44px)); }
+      @media (min-width: 761px) {
+        .wr-topic-panel.is-wide .wr-topic-panel-body { grid-template-columns: 280px minmax(0, 1fr); }
+        .wr-topic-panel.is-wide .wr-topic-group-book-list { grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); }
+      }
+      @media (max-width: 760px) {
+        .wr-topic-panel.is-wide { width: 100vw; }
+        .wr-topic-tabs { padding-right: 0; flex-wrap: wrap; }
+        .wr-topic-workspace-toggle { position: static; margin-top: 8px; }
+        .wr-topic-group-book-list { grid-template-columns: minmax(0, 1fr); }
+        .wr-topic-graph-toolbar { display: flex; flex-wrap: wrap; }
+        .wr-topic-graph-toolbar input { flex: 1 1 100%; }
+        .wr-topic-graph-navigation select { width: min(240px, 60vw); }
+        .wr-topic-graph-body { grid-template-rows: minmax(140px, 1fr) auto; }
+        .wr-topic-workspace-layer > .wr-topic-graph-card { padding: 0; }
+        .wr-topic-panel.is-wide.has-workspace-layer .wr-topic-sidebar { display: none; }
+      }
       @media (hover: none) {
         .wr-topic-group-book-menu-button,
         .wr-topic-relation-actions {
@@ -3938,7 +4001,7 @@
         const level = readingLevelForBook(book.id);
         if (state.levelFilter !== "all" && level !== state.levelFilter) return false;
         if (!query) return true;
-        return `${book.title || ""} ${book.author || ""}`
+        return `${book.title || ""} ${book.displayTitle || ""} ${book.author || ""}`
           .toLocaleLowerCase()
           .includes(query);
       })
@@ -3967,6 +4030,26 @@
       cover: String(book.coverUrl || book.cover || ""),
       url: String(book.readerUrl || book.detailUrl || book.url || ""),
     };
+  }
+
+  function bookPresentation(book) {
+    const original = String(book.title || "");
+    const edition = original.match(/(?:[_\s（(\-]*)(中英对照|中文译本)[）)]?$/u)?.[1] || "";
+    const display = String(book.displayTitle || "").trim();
+    const title = display || original
+      .replace(/(?:[_\s（(\-]*)(中英对照|中文译本)[）)]?$/u, "")
+      .replace(/_+/g, " ").trim() || original;
+    return { title, edition };
+  }
+
+  function bookTitleMarkup(book) {
+    const presentation = bookPresentation(book);
+    return `${escapeHtml(presentation.title)}${presentation.edition ? `<span class="wr-topic-edition">${escapeHtml(presentation.edition)}</span>` : ""}`;
+  }
+
+  function directReaderHtml(book) {
+    const url = readerUrlForBook(book);
+    return url ? `<button class="wr-topic-btn wr-topic-direct-reader" type="button" data-wr-action="open-reader" data-url="${escapeHtml(url)}" aria-label="进入阅读：${escapeHtml(bookPresentation(book).title)}">${iconSvg("bookOpen")}<span>进入阅读</span></button>` : "";
   }
 
   function readerUrlForBook(book) {
@@ -4019,6 +4102,7 @@
     if (book.lastUserEditedAt) {
       normalized.lastUserEditedAt = String(book.lastUserEditedAt);
     }
+    if (typeof book.displayTitle === "string") normalized.displayTitle = book.displayTitle.trim().slice(0, 300);
     return normalized;
   }
 
@@ -4635,7 +4719,7 @@
     const library = libraryBookList();
     const books = query
       ? library.filter((book) =>
-          `${book.title || ""} ${book.author || ""}`.toLowerCase().includes(query),
+          `${book.title || ""} ${book.displayTitle || ""} ${book.author || ""}`.toLowerCase().includes(query),
         )
       : library;
 
@@ -4716,7 +4800,7 @@
             <span class="wr-topic-group-desc">${escapeHtml(group.description || "暂无描述")}</span>
             <span class="wr-topic-group-footer">
               <span class="wr-topic-group-meta">${progress.total} 本书</span>
-              <span class="wr-topic-group-progress" title="有阅读上下文 ${progress.completed} / ${progress.total} 本">${progress.completed}/${progress.total}</span>
+              <span class="wr-topic-group-progress" title="有阅读上下文 ${progress.completed} / ${progress.total} 本">上下文 ${progress.completed}/${progress.total}</span>
             </span>
           </button>
         `;
@@ -4870,7 +4954,7 @@
         ${groupBooks(group)
           .map((book) => {
             const context = getBookContextSummary(book.id);
-            const contextLabel = context || "暂无阅读上下文，点击添加";
+            const contextLabel = context || "＋补充阅读缘由";
             const isPinned = groupPinnedBookIds(group).includes(book.id);
             return `
               <article class="wr-topic-group-book-card${isPinned ? " is-pinned" : ""}">
@@ -4878,8 +4962,9 @@
                   ${coverMarkup(book, "wr-topic-group-book-cover")}
                 </button>
                 <div class="wr-topic-group-book-content">
-                  <button class="wr-topic-group-book-title-action" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文：${escapeHtml(book.title)}">${escapeHtml(book.title)}</button>
+                  <button class="wr-topic-group-book-title-action" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="${escapeHtml(book.title)}">${bookTitleMarkup(book)}</button>
                   <button class="wr-topic-group-book-context ${context ? "" : "is-empty"}" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" title="打开书籍阅读上下文">${escapeHtml(contextLabel)}</button>
+                  <div class="wr-topic-card-reading-actions">${context ? '<button class="wr-topic-text-action" type="button" data-wr-action="expand-card-context" aria-expanded="false">展开</button>' : ""}${directReaderHtml(book)}</div>
                 </div>
                 ${isPinned ? `<span class="wr-topic-group-book-pin" role="img" aria-label="已置顶" title="已置顶">${iconSvg("pin")}</span>` : ""}
                 ${readingLevelMenuHtml(book, group)}
@@ -5007,11 +5092,12 @@
           </div>
         </div>
         <div class="wr-topic-catalog-stats">
-          <div class="wr-topic-catalog-stat"><strong>${Number(stats.recognizedLibraryBooks || libraryBookList().length)}</strong><span>本地书库书籍</span></div>
+          <div class="wr-topic-catalog-stat"><strong>${Number(stats.total || 0)}</strong><span>Obsidian 书目</span></div>
           <div class="wr-topic-catalog-stat"><strong>${Number(stats.inShelf || 0)}</strong><span>已匹配本地</span></div>
           <div class="wr-topic-catalog-stat"><strong>${Number(stats.notInShelf || 0)}</strong><span>未匹配本地</span></div>
-          <div class="wr-topic-catalog-stat"><strong>${Number(stats.withContext || 0)}</strong><span>包含 WHY</span></div>
+          <div class="wr-topic-catalog-stat"><strong>${Number(stats.withContext || 0)}</strong><span>Obsidian 有阅读缘由</span></div>
         </div>
+        <p class="wr-topic-field-hint">本地书库共 ${libraryBookList().length} 本；以上匹配统计以 Obsidian 书目为范围。</p>
         <div class="wr-topic-catalog-controls">
           <input class="wr-topic-input wr-topic-catalog-search" type="search" data-wr-action="filter-catalog" placeholder="搜索 Obsidian 书名或匹配书名" value="${escapeHtml(state.catalogQuery)}" autocomplete="off">
           ${[
@@ -5042,15 +5128,15 @@
           const level = readingLevelForBook(book.id);
           const context = getBookContextSummary(book.id);
           return `
-            <button class="wr-topic-graded-card" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" aria-label="打开书籍阅读上下文：${escapeHtml(book.title)}">
+            <article class="wr-topic-graded-card"><button class="wr-topic-graded-main" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" aria-label="打开书籍阅读上下文：${escapeHtml(book.title)}">
               ${coverMarkup(book, "wr-topic-graded-cover")}
               <span class="wr-topic-graded-content">
-                <span class="wr-topic-graded-title" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</span>
+                <span class="wr-topic-graded-title" title="${escapeHtml(book.title)}">${bookTitleMarkup(book)}</span>
                 ${book.author ? `<span class="wr-topic-graded-author">${escapeHtml(book.author)}</span>` : ""}
-                <span class="wr-topic-graded-context ${context ? "" : "is-empty"}">${escapeHtml(context || "暂无阅读上下文")}</span>
+                <span class="wr-topic-graded-context ${context ? "" : "is-empty"}">${escapeHtml(context || "＋补充阅读缘由")}</span>
                 <span class="wr-topic-level-badge ${level}">${readingLevelLabel(level)}</span>
               </span>
-            </button>`;
+            </button>${directReaderHtml(book)}</article>`;
         })
         .join("")}
     </div>`;
@@ -5121,7 +5207,7 @@
     return libraryBookList().filter((book) => {
       if (state.libraryFilter === "weread" && book.source !== "weread") return false;
       if (state.libraryFilter === "manual" && book.source !== "manual") return false;
-      if (query && !`${book.title} ${book.author}`.toLocaleLowerCase().includes(query)) return false;
+      if (query && !`${book.title} ${book.displayTitle || ""} ${book.author}`.toLocaleLowerCase().includes(query)) return false;
       return true;
     });
   }
@@ -5133,12 +5219,13 @@
         <button class="wr-topic-library-main" type="button" data-wr-action="open-book-note" data-book-id="${escapeHtml(book.id)}" aria-label="打开书籍阅读上下文：${escapeHtml(book.title)}">
           ${coverMarkup(book, "wr-topic-library-cover")}
           <span class="wr-topic-library-content">
-            <span class="wr-topic-library-title">${escapeHtml(book.title)}</span>
+            <span class="wr-topic-library-title" title="${escapeHtml(book.title)}">${bookTitleMarkup(book)}</span>
             <span class="wr-topic-library-meta">${escapeHtml(book.author || "未知作者")} · ${book.source === "weread" ? "微信读书" : "外部书"}</span>
             <span class="wr-topic-library-context">${escapeHtml(context || "暂无阅读上下文")}</span>
           </span>
         </button>
         <div class="wr-topic-library-card-actions">
+          ${directReaderHtml(book)}
           <button class="wr-topic-icon-btn" type="button" data-wr-action="edit-library-book" data-book-id="${escapeHtml(book.id)}" title="编辑书籍" aria-label="编辑书籍">${iconSvg("edit")}</button>
           <button class="wr-topic-icon-btn danger" type="button" data-wr-action="delete-library-book" data-book-id="${escapeHtml(book.id)}" title="删除书籍" aria-label="删除书籍">${iconSvg("trash")}</button>
         </div>
@@ -5221,6 +5308,7 @@
         </div>
         <form class="wr-topic-book-editor-form" data-wr-form="library-book" data-book-id="${escapeHtml(existing ? existing.id : "")}">
           <div class="wr-topic-field"><label for="wr-library-title">书名</label><input id="wr-library-title" class="wr-topic-input" name="title" maxlength="300" value="${escapeHtml(book.title)}" required autocomplete="off"></div>
+          <div class="wr-topic-field"><label for="wr-library-display-title">显示书名</label><input id="wr-library-display-title" class="wr-topic-input" name="displayTitle" maxlength="300" value="${escapeHtml(book.displayTitle || "")}" placeholder="可选，用于书架显示"><p class="wr-topic-field-hint">原始书名继续用于匹配；留空时自动整理下划线和版本后缀。</p></div>
           <div class="wr-topic-field"><label for="wr-library-author">作者</label><input id="wr-library-author" class="wr-topic-input" name="author" maxlength="300" value="${escapeHtml(book.author)}" autocomplete="off"></div>
           <div class="wr-topic-field"><label for="wr-library-cover">封面 URL</label><input id="wr-library-cover" class="wr-topic-input" name="coverUrl" type="url" maxlength="2048" value="${escapeHtml(book.coverUrl)}" placeholder="https://...">${existing && existing.source === "weread" ? '<p class="wr-topic-field-hint">手动修改后会优先使用此封面；清空可恢复微信读书封面。</p>' : ""}</div>
           <div class="wr-topic-field"><label for="wr-library-detail">书籍详情 URL</label><input id="wr-library-detail" class="wr-topic-input" name="detailUrl" type="url" maxlength="2048" value="${escapeHtml(book.detailUrl)}" placeholder="https://..."></div>
@@ -5292,6 +5380,7 @@
         ...(existing || {}),
         id,
         title,
+        displayTitle: form.elements.displayTitle.value.trim(),
         author: form.elements.author.value.trim(),
         ...coverFields,
         detailUrl,
@@ -5439,6 +5528,7 @@
       {
         ...manual,
         title: weread.title || manual.title,
+        displayTitle: manual.displayTitle || weread.displayTitle || "",
         author: weread.author || manual.author,
         coverUrl: weread.coverUrl || manual.coverUrl,
         detailUrl: weread.detailUrl || manual.detailUrl,
@@ -5684,6 +5774,10 @@
   function renderPanel() {
     const panel = document.getElementById("wr-topic-panel-root");
     if (!panel) return;
+    // Keep live forms and canvases intact when a shelf scan refreshes the panel.
+    const layers = ["wr-topic-note-modal", "wr-topic-graph-modal"]
+      .map((id) => document.getElementById(id)).filter(Boolean);
+    layers.forEach((layer) => { if (panel.contains(layer)) getMountRoot().appendChild(layer); });
 
     const groups = getGroups();
     const selected =
@@ -5704,7 +5798,7 @@
 
     panel.innerHTML = `
       <div class="wr-topic-overlay" data-wr-action="close-panel">
-        <aside class="wr-topic-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(text.panelTitle)}">
+        <aside class="wr-topic-panel ${state.workspaceWide ? "is-wide" : ""}" role="dialog" aria-modal="true" aria-label="${escapeHtml(text.panelTitle)}">
           <header class="wr-topic-panel-header">
             <div class="wr-topic-header-main">
               <div class="wr-topic-header-title">
@@ -5712,8 +5806,8 @@
               </div>
               <div class="wr-topic-shelf-tools" role="group" aria-label="书架工具">
                 <button class="wr-topic-header-tool" type="button" data-wr-action="refresh-shelf">${iconSvg("refresh", "wr-topic-icon wr-topic-header-tool-icon")}<span>刷新书架</span></button>
-                <button class="wr-topic-header-tool" type="button" data-wr-action="load-full-shelf">${iconSvg("library", "wr-topic-icon wr-topic-header-tool-icon")}<span>完整书架</span></button>
-                <button class="wr-topic-header-tool" type="button" data-wr-action="open-graph" data-scope="all">${iconSvg("network", "wr-topic-icon wr-topic-header-tool-icon")}<span>${text.libraryGraph}</span></button>
+                <button class="wr-topic-header-tool" type="button" data-wr-action="load-full-shelf">${iconSvg("library", "wr-topic-icon wr-topic-header-tool-icon")}<span>加载全部书架</span></button>
+                <button class="wr-topic-header-tool" type="button" data-wr-action="open-graph" data-scope="${state.panelTab === "groups" && current ? "group" : "all"}" data-group-id="${escapeHtml(current?.id || "")}">${iconSvg("network", "wr-topic-icon wr-topic-header-tool-icon")}<span>阅读关系</span></button>
               </div>
               <div class="wr-topic-header-actions">
                 <div class="wr-topic-sync-group" role="group" aria-label="云同步工具">
@@ -5730,6 +5824,7 @@
               <button class="wr-topic-tab ${state.panelTab === "levels" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "levels"}" data-wr-action="switch-tab" data-tab="levels">${text.gradedReading}</button>
               <button class="wr-topic-tab ${state.panelTab === "library" ? "active" : ""}" type="button" role="tab" aria-selected="${state.panelTab === "library"}" data-wr-action="switch-tab" data-tab="library">${text.bookManagement}</button>
             </div>
+            <button class="wr-topic-btn wr-topic-workspace-toggle" type="button" data-wr-action="toggle-workspace" aria-pressed="${state.workspaceWide}">${iconSvg(state.workspaceWide ? "exitFullscreen" : "fullscreen")}<span>${state.workspaceWide ? "收起工作区" : "展开工作区"}</span></button>
           </header>
           ${
             state.panelTab === "catalog"
@@ -5740,7 +5835,7 @@
                   ? renderLibraryView()
                 : `<div class="wr-topic-panel-body">
                   <section class="wr-topic-sidebar">
-                    <div class="wr-topic-count">微信书架 ${state.books.length} 本 · 本地书库 ${libraryBookList().length} 本</div>
+                    <div class="wr-topic-count">当前已识别 ${state.books.length} 本 · 本地书库 ${libraryBookList().length} 本</div>
                     <div class="wr-topic-sidebar-title-row">
                       <h3>${text.groups}</h3>
                       ${groupListSortMenuHtml()}
@@ -5763,6 +5858,34 @@
         </aside>
       </div>
     `;
+    mountWorkspaceLayers();
+  }
+
+  function mountWorkspaceLayers() {
+    const panel = document.querySelector(".wr-topic-panel");
+    const host = state.workspaceWide && panel
+      ? panel.querySelector(".wr-topic-detail, .wr-topic-catalog, .wr-topic-graded, .wr-topic-library") : null;
+    panel?.classList.toggle("has-workspace-layer", Boolean(host && (document.getElementById("wr-topic-note-modal") || document.getElementById("wr-topic-graph-modal"))));
+    document.querySelectorAll(".has-workspace-note, .has-workspace-graph").forEach((element) => {
+      element.classList.remove("has-workspace-note", "has-workspace-graph");
+    });
+    for (const [id, kind] of [["wr-topic-note-modal", "note"], ["wr-topic-graph-modal", "graph"]]) {
+      const layer = document.getElementById(id);
+      if (!layer) continue;
+      const parent = host || getMountRoot();
+      if (layer.parentElement !== parent) parent.appendChild(layer);
+      layer.classList.toggle("wr-topic-workspace-layer", Boolean(host));
+      const card = layer.firstElementChild;
+      card?.setAttribute("aria-modal", host ? "false" : "true");
+      const back = layer.querySelector(`[data-wr-action="${kind === "note" ? "close-note-modal" : "close-graph"}"]`);
+      if (back) {
+        back.textContent = host ? (kind === "graph" && document.getElementById("wr-topic-note-modal") ? "返回上下文" : "返回书籍") : "关闭";
+        back.setAttribute("aria-label", back.textContent);
+        back.title = back.textContent;
+      }
+      if (host) host.classList.add(`has-workspace-${kind}`);
+    }
+    if (state.graph) window.requestAnimationFrame(() => state.graph?.resize());
   }
 
   async function openPanel() {
@@ -5805,6 +5928,8 @@
   }
 
   function closePanel() {
+    closeGraphModal();
+    closeNoteModal();
     const root = document.getElementById("wr-topic-panel-root");
     if (root) root.remove();
     state.formMode = "";
@@ -6077,7 +6202,7 @@
         <div class="wr-topic-modal-book">
           ${coverMarkup(book, "wr-topic-modal-book-cover")}
           <div class="wr-topic-modal-book-info">
-            <span class="wr-topic-book-title">${escapeHtml(book.title)}</span>
+            <span class="wr-topic-book-title" title="${escapeHtml(book.title)}">${bookTitleMarkup(book)}</span>
             <span class="wr-topic-book-author">${escapeHtml(book.author)}</span>
           </div>
           <div class="wr-topic-modal-book-tools">
@@ -6130,6 +6255,7 @@
       if (!safeAppend(getMountRoot(), modal, "note modal")) return;
     }
     modal.innerHTML = renderBookNoteContent(bookId);
+    mountWorkspaceLayers();
   }
 
   function refreshNoteRelationSections(bookId) {
@@ -6149,6 +6275,7 @@
     if (modal) modal.remove();
     state.noteNavigationStack = [];
     state.noteDrafts = {};
+    mountWorkspaceLayers();
   }
 
   function relationCandidateBooks(input) {
@@ -6159,7 +6286,7 @@
       .filter(
         (book) =>
           book.id !== currentBookId &&
-          (!query || normalizeTitle(`${book.title} ${book.author}`).includes(query)),
+          (!query || normalizeTitle(`${book.title} ${book.displayTitle || ""} ${book.author}`).includes(query)),
       )
       .slice(0, 8);
   }
@@ -6408,7 +6535,7 @@
         const outside = scope === "group" && !endpointInGroup(relation, side);
         nodes.set(ref.nodeId, {
           id: ref.nodeId,
-          label: outside ? `组外 · ${book.title}` : book.title,
+          label: outside ? `组外 · ${bookPresentation(book).title}` : bookPresentation(book).title,
           title: book.title,
           cover: book.cover || ref.coverUrl || "",
           url: book.url || ref.detailUrl || "",
@@ -6445,24 +6572,67 @@
   }
 
   function graphLayoutOptions(data) {
-    return graphHasCycle(data.nodes, data.relations)
-      ? {
-          name: "cose",
-          animate: false,
-          padding: 36,
-          nodeRepulsion: 7500,
-          idealEdgeLength: 140,
-          nodeOverlap: 30,
-          nodeDimensionsIncludeLabels: true,
+    return { name: "preset", positions: graphLayoutPositions(data), animate: false, padding: 48, fit: true };
+  }
+
+  function graphLayoutPositions(data) {
+    const adjacent = new Map(data.nodes.map((node) => [node.id, new Set()]));
+    for (const relation of data.relations) {
+      const from = relation.from.nodeId, to = relation.to.nodeId;
+      if (!adjacent.has(from) || !adjacent.has(to)) continue;
+      adjacent.get(from).add(to);
+      adjacent.get(to).add(from);
+    }
+    const remaining = new Set(adjacent.keys());
+    const components = [];
+    while (remaining.size) {
+      const seed = [...remaining].sort((a, b) => adjacent.get(b).size - adjacent.get(a).size)[0];
+      const members = [seed];
+      remaining.delete(seed);
+      for (let index = 0; index < members.length; index += 1) {
+        for (const next of adjacent.get(members[index])) {
+          if (remaining.delete(next)) members.push(next);
         }
-      : {
-          name: "breadthfirst",
-          directed: true,
-          animate: false,
-          padding: 36,
-          spacingFactor: 1.3,
-          nodeDimensionsIncludeLabels: true,
-        };
+      }
+      components.push(members);
+    }
+    components.sort((a, b) => b.length - a.length);
+    const targetWidth = Math.max(450, Math.ceil(Math.sqrt(data.nodes.length * 150 * 180 * 1.35)));
+    const positions = Object.create(null);
+    let x = 0, y = 0, rowHeight = 0;
+    for (const members of components) {
+      const columns = Math.ceil(Math.sqrt(members.length));
+      const width = columns * 150, height = Math.ceil(members.length / columns) * 180;
+      if (x && x + width > targetWidth) { x = 0; y += rowHeight + 60; rowHeight = 0; }
+      members.forEach((id, index) => {
+        const row = Math.floor(index / columns);
+        // Alternate direction to keep successive path nodes near each other.
+        const column = row % 2 ? columns - 1 - index % columns : index % columns;
+        positions[id] = { x: x + column * 150 + 75, y: y + row * 180 + 90 };
+      });
+      x += width + 60;
+      rowHeight = Math.max(rowHeight, height);
+    }
+    return positions;
+  }
+
+  function filteredGraphData(data, query = "", type = "all") {
+    const normalized = normalizeTitle(query);
+    const matches = new Set(data.nodes.filter((node) => normalizeTitle(`${node.title} ${node.label || ""}`).includes(normalized)).map((node) => node.id));
+    const relations = data.relations.filter((relation) =>
+      (type === "all" || relation.type === type) && (!normalized || matches.has(relation.from.nodeId) || matches.has(relation.to.nodeId) || normalizeTitle(relation.reason).includes(normalized)),
+    );
+    const ids = new Set(relations.flatMap((relation) => [relation.from.nodeId, relation.to.nodeId]));
+    return { ...data, relations, nodes: data.nodes.filter((node) => ids.has(node.id)) };
+  }
+
+  function graphRelationListHtml(data) {
+    if (!data.relations.length) return '<p class="wr-topic-empty">没有符合条件的阅读关系。</p>';
+    return data.relations.map((relation) => `<button type="button" class="wr-topic-graph-relation-row" data-wr-action="inspect-graph-relation" data-relation-id="${escapeHtml(relation.id)}">
+      <span class="wr-topic-graph-edge-title"><strong>${escapeHtml(bookPresentation(relationRefBook(relation.from)).title)}</strong><span>→</span><strong>${escapeHtml(bookPresentation(relationRefBook(relation.to)).title)}</strong></span>
+      <span class="wr-topic-relation-type ${escapeHtml(relation.type)}">${relationTypeLabel(relation.type)}</span>
+      <span class="wr-topic-graph-reason">${escapeHtml(relation.reason || "尚未补充关系缘由")}</span>
+    </button>`).join("");
   }
 
   function graphTitle(data) {
@@ -6735,12 +6905,14 @@
       return `
         <div class="wr-topic-graph-inspector-content">
           ${coverMarkup({ title: data.title, cover: data.cover }, "wr-topic-relation-cover")}
-          <div><strong>${escapeHtml(data.title)}</strong>${data.outside ? '<span class="wr-topic-graph-outside">组外</span>' : ""}</div>
+          <div><strong>${escapeHtml(data.label || bookPresentation(data).title)}</strong>${data.outside ? '<span class="wr-topic-graph-outside">组外</span>' : ""}</div>
         </div>
         <div class="wr-topic-graph-inspector-actions">
           ${data.bookId ? `<button class="wr-topic-btn" type="button" data-wr-action="open-graph-book" data-book-id="${escapeHtml(data.bookId)}">打开上下文</button>` : ""}
           ${data.url ? `<button class="wr-topic-btn" type="button" data-wr-action="open-external" data-url="${escapeHtml(data.url)}">${iconSvg("external")}<span>书籍详情</span></button>` : ""}
-        </div>`;
+        </div>
+        <h4>相邻阅读关系</h4>
+        ${graphRelationListHtml({ relations: filteredGraphData(graphScopeData(state.graphContext || { scope: "all" }), "", state.graphType).relations.filter((relation) => relation.from.nodeId === data.id || relation.to.nodeId === data.id) })}`;
     }
     const relation = state.relations.find((item) => item.id === data.id);
     if (!relation) return "";
@@ -6779,7 +6951,7 @@
     state.graph = cytoscapeFactory({
       container,
       elements: graphElements(data),
-      minZoom: 0.2,
+      minZoom: 0.08,
       maxZoom: 3,
       layout: graphLayoutOptions(data),
       style: [
@@ -6796,9 +6968,9 @@
             "border-color": "#8aaee0",
             label: "data(label)",
             color: "#1f2933",
-            "font-size": 10,
-            "text-wrap": "ellipsis",
-            "text-max-width": 92,
+            "font-size": 13,
+            "text-wrap": "wrap",
+            "text-max-width": 132,
             "text-valign": "bottom",
             "text-margin-y": 10,
           },
@@ -6824,12 +6996,18 @@
         { selector: "edge.author-citation", style: { "line-color": "#e68724", "target-arrow-color": "#e68724" } },
         { selector: "edge.question-driven", style: { "line-color": "#2d9a5b", "target-arrow-color": "#2d9a5b" } },
         { selector: ".wr-graph-hidden", style: { display: "none" } },
+        { selector: ".wr-graph-dimmed", style: { opacity: 0.15 } },
+        { selector: "edge.wr-graph-highlight", style: { width: 4 } },
       ],
     });
     let lastTap = { id: "", at: 0 };
     state.graph.on("tap", "node", (event) => {
       const node = event.target;
       const item = node.data();
+      state.graph.elements().removeClass("wr-graph-dimmed wr-graph-highlight");
+      const neighborhood = node.closedNeighborhood();
+      state.graph.elements().difference(neighborhood).addClass("wr-graph-dimmed");
+      neighborhood.edges().addClass("wr-graph-highlight");
       updateGraphInspector("node", item);
       const now = Date.now();
       if (lastTap.id === item.id && now - lastTap.at < 320) {
@@ -6847,14 +7025,19 @@
       }
       lastTap = { id: item.id, at: now };
     });
-    state.graph.on("tap", "edge", (event) =>
-      updateGraphInspector("edge", event.target.data()),
-    );
+    state.graph.on("tap", "edge", (event) => {
+      state.graph.elements().removeClass("wr-graph-dimmed wr-graph-highlight");
+      updateGraphInspector("edge", event.target.data());
+    });
+    state.graph.on("tap", (event) => {
+      if (event.target === state.graph) state.graph.elements().removeClass("wr-graph-dimmed wr-graph-highlight");
+    });
     return state.graph;
   }
 
-  function openGraph(context = { scope: "all" }) {
+  function openGraph(context = { scope: "all" }, preserveFilters = false) {
     closeGraphModal();
+    if (!preserveFilters) { state.graphQuery = ""; state.graphType = "all"; state.graphView = "graph"; }
     const data = graphScopeData(context);
     state.graphContext = { ...context };
     const modal = document.createElement("div");
@@ -6864,11 +7047,19 @@
       <div class="wr-topic-graph-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(graphTitle(data))}">
         <div class="wr-topic-modal-head">
           <h3>${escapeHtml(graphTitle(data))}</h3>
-          <button class="wr-topic-icon-btn" type="button" data-wr-action="close-graph" title="关闭" aria-label="关闭">${iconSvg("x")}</button>
+          <button class="wr-topic-btn" type="button" data-wr-action="close-graph" title="关闭" aria-label="关闭">关闭</button>
+        </div>
+        <div class="wr-topic-graph-navigation">
+          <label>范围 <select class="wr-topic-input" data-wr-action="graph-scope" aria-label="关系范围">
+            ${context.bookId ? `<option value="book" ${context.scope === "book" ? "selected" : ""}>当前书 · 相邻关系</option>` : ""}
+            ${getGroups().map((group) => `<option value="group:${escapeHtml(group.id)}" ${context.scope === "group" && context.groupId === group.id ? "selected" : ""}>主题 · ${escapeHtml(group.name)}</option>`).join("")}
+            <option value="all" ${context.scope === "all" ? "selected" : ""}>全库关系</option>
+          </select></label>
+          <div role="group" aria-label="关系显示方式"><button class="wr-topic-btn" type="button" data-wr-action="graph-view" data-view="graph" aria-pressed="${state.graphView === "graph"}">关系图</button><button class="wr-topic-btn" type="button" data-wr-action="graph-view" data-view="list" aria-pressed="${state.graphView === "list"}">关系列表</button></div>
         </div>
         ${data.relations.length ? `
           <div class="wr-topic-graph-toolbar">
-            <input class="wr-topic-input" type="search" data-wr-action="graph-search" placeholder="搜索书名" aria-label="搜索书名">
+            <input class="wr-topic-input" type="search" data-wr-action="graph-search" placeholder="搜索书名或关系缘由" aria-label="搜索书名或关系缘由" value="${escapeHtml(state.graphQuery)}">
             <select class="wr-topic-input" data-wr-action="graph-filter" aria-label="筛选关系类型">
               <option value="all">全部关系</option>
               <option value="extended-reading">延伸阅读</option>
@@ -6879,12 +7070,17 @@
             <button class="wr-topic-icon-btn" type="button" data-wr-action="graph-layout" title="重新布局" aria-label="重新布局">${iconSvg("network")}</button>
             <button class="wr-topic-icon-btn" type="button" data-wr-action="graph-fullscreen" title="全屏查看" aria-label="全屏查看" aria-pressed="false">${iconSvg("fullscreen")}</button>
           </div>
+          <p class="wr-topic-graph-summary" data-wr-graph-summary aria-live="polite"></p>
           <div class="wr-topic-graph-body">
             <div class="wr-topic-graph-canvas" data-wr-graph-canvas><div class="wr-topic-graph-error wr-topic-graph-loading" data-wr-graph-loading>正在加载封面...</div></div>
+            <div class="wr-topic-graph-list" data-wr-graph-list hidden>${graphRelationListHtml(data)}</div>
             <aside class="wr-topic-graph-inspector" data-wr-graph-inspector><p>选择一本书或一条关系查看详情。</p></aside>
           </div>` : '<div class="wr-topic-graph-empty">这个范围内还没有阅读关系。</div>'}
       </div>`;
     if (!safeAppend(getMountRoot(), modal, "graph modal")) return;
+    mountWorkspaceLayers();
+    const typeSelect = modal.querySelector('[data-wr-action="graph-filter"]');
+    if (typeSelect) typeSelect.value = state.graphType;
     if (data.relations.length) {
       window.setTimeout(() => {
         if (
@@ -6894,6 +7090,8 @@
           return;
         }
         const graph = initializeGraph(data);
+        filterGraph();
+        setGraphView(state.graphView);
         if (graph) {
           hydrateGraphCoverImages(graph, data.nodes).catch((error) => {
             console.warn("[WeRead Local Topic Shelf] Failed to hydrate graph covers:", error);
@@ -6911,6 +7109,7 @@
     const modal = document.getElementById("wr-topic-graph-modal");
     if (modal) modal.remove();
     state.graphContext = null;
+    mountWorkspaceLayers();
   }
 
   function graphCardIsFullscreen(card) {
@@ -6936,7 +7135,7 @@
     window.requestAnimationFrame(() => {
       if (!state.graph) return;
       state.graph.resize();
-      state.graph.fit(undefined, 36);
+      fitReadableGraph();
     });
   }
 
@@ -6968,35 +7167,57 @@
 
   function refreshOpenGraph() {
     const context = state.graphContext ? { ...state.graphContext } : null;
-    if (context) openGraph(context);
+    if (context) openGraph(context, true);
   }
 
   function filterGraph() {
+    if (!state.graphContext) return;
+    state.graphQuery = document.querySelector('[data-wr-action="graph-search"]')?.value || "";
+    state.graphType = document.querySelector('[data-wr-action="graph-filter"]')?.value || "all";
+    const data = filteredGraphData(graphScopeData(state.graphContext), state.graphQuery, state.graphType);
+    const list = document.querySelector("[data-wr-graph-list]");
+    if (list) list.innerHTML = graphRelationListHtml(data);
+    const summary = document.querySelector("[data-wr-graph-summary]");
+    if (summary) summary.textContent = data.relations.length ? `${data.nodes.length} 本书 · ${data.relations.length} 条关系 · 拖动与滚轮浏览，适应画布查看全貌` : "没有符合条件的阅读关系";
+    const inspector = document.querySelector("[data-wr-graph-inspector]");
+    if (inspector) inspector.innerHTML = "<p>选择一本书或一条关系，查看连接它们的原因。</p>";
     if (!state.graph) return;
-    const query = normalizeTitle(
-      document.querySelector('[data-wr-action="graph-search"]')?.value || "",
-    );
-    const type =
-      document.querySelector('[data-wr-action="graph-filter"]')?.value || "all";
-    state.graph.elements().removeClass("wr-graph-hidden");
-    state.graph.edges().forEach((edge) => {
-      if (type !== "all" && edge.data("type") !== type) {
-        edge.addClass("wr-graph-hidden");
-      }
-    });
-    state.graph.nodes().forEach((node) => {
-      const hasVisibleEdge = node.connectedEdges().some((edge) => !edge.hasClass("wr-graph-hidden"));
-      const matches = !query || normalizeTitle(node.data("title")).includes(query);
-      if (!hasVisibleEdge || !matches) node.addClass("wr-graph-hidden");
-    });
-    state.graph.edges().forEach((edge) => {
-      if (
-        edge.source().hasClass("wr-graph-hidden") ||
-        edge.target().hasClass("wr-graph-hidden")
-      ) {
-        edge.addClass("wr-graph-hidden");
-      }
-    });
+    const ids = new Set([...data.nodes.map((node) => node.id), ...data.relations.map((relation) => relation.id)]);
+    state.graph.elements().removeClass("wr-graph-hidden wr-graph-dimmed wr-graph-highlight");
+    state.graph.elements().forEach((element) => { if (!ids.has(element.id())) element.addClass("wr-graph-hidden"); });
+    if (data.nodes.length) {
+      state.graph.elements().filter((element) => ids.has(element.id())).layout(graphLayoutOptions(data)).run();
+      fitReadableGraph();
+    }
+  }
+
+  function fitReadableGraph() {
+    const graph = state.graph;
+    if (!graph) return;
+    const visible = graph.elements().filter((element) => !element.hasClass("wr-graph-hidden"));
+    if (!visible.length) return;
+    graph.fit(visible, 48);
+    // Keep titles readable in dense scopes; the fit button still offers an overview.
+    if (graph.zoom() < 0.85) {
+      const anchor = visible.nodes().sort((a, b) => a.position("y") - b.position("y") || a.position("x") - b.position("x"))[0];
+      if (!anchor) return;
+      graph.zoom(0.85);
+      graph.pan({ x: 80 - anchor.position("x") * 0.85, y: 80 - anchor.position("y") * 0.85 });
+    }
+  }
+
+  function setGraphView(view) {
+    state.graphView = view === "list" ? "list" : "graph";
+    const canvas = document.querySelector("[data-wr-graph-canvas]");
+    const list = document.querySelector("[data-wr-graph-list]");
+    if (canvas) canvas.hidden = state.graphView === "list";
+    if (list) list.hidden = state.graphView !== "list";
+    document.querySelectorAll('[data-wr-action="graph-view"]').forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.view === state.graphView)));
+    document.querySelectorAll('[data-wr-action="graph-fit"], [data-wr-action="graph-layout"]').forEach((button) => { button.disabled = state.graphView === "list"; });
+    if (state.graphView === "graph" && state.graph) {
+      state.graph.resize();
+      fitReadableGraph();
+    }
   }
 
   function openExternalUrl(url) {
@@ -7154,6 +7375,9 @@
       closeGroupSortMenus();
       return;
     }
+    // Embedded forms/canvases live below the backdrop. Their native events
+    // must reach the control rather than being handled as backdrop clicks.
+    if (actionEl.classList.contains("wr-topic-overlay") && actionEl !== event.target) return;
 
     if (!actionEl.closest(".wr-topic-group-book-menu")) closeBookMenus();
     if (!actionEl.closest(".wr-topic-group-sort")) closeGroupSortMenus();
@@ -7177,6 +7401,21 @@
     }
 
     if (action === "open-panel") await openPanel();
+    if (action === "toggle-workspace") {
+      state.workspaceWide = !state.workspaceWide;
+      document.querySelector(".wr-topic-panel")?.classList.toggle("is-wide", state.workspaceWide);
+      actionEl.setAttribute("aria-pressed", String(state.workspaceWide));
+      actionEl.innerHTML = `${iconSvg(state.workspaceWide ? "exitFullscreen" : "fullscreen")}<span>${state.workspaceWide ? "收起工作区" : "展开工作区"}</span>`;
+      mountWorkspaceLayers();
+    }
+    if (action === "expand-card-context") {
+      const card = actionEl.closest(".wr-topic-group-book-card");
+      if (card) {
+        const expanded = card.classList.toggle("is-expanded");
+        actionEl.setAttribute("aria-expanded", String(expanded));
+        actionEl.textContent = expanded ? "收起" : "展开";
+      }
+    }
     if (action === "open-cloud-settings") openCloudSettings();
     if (action === "close-cloud-settings") closeCloudSettings();
     if (action === "sync-cloud") {
@@ -7380,10 +7619,15 @@
       });
     }
     if (action === "close-graph") closeGraphModal();
-    if (action === "graph-fit" && state.graph) state.graph.fit(undefined, 36);
+    if (action === "graph-view") setGraphView(actionEl.dataset.view);
+    if (action === "inspect-graph-relation") updateGraphInspector("edge", { id: actionEl.dataset.relationId });
+    if (action === "graph-fit" && state.graph) {
+      const visible = state.graph.elements().filter((element) => !element.hasClass("wr-graph-hidden"));
+      if (visible.length) state.graph.fit(visible, 48);
+    }
     if (action === "graph-fullscreen") await toggleGraphFullscreen();
     if (action === "graph-layout" && state.graph && state.graphContext) {
-      state.graph.layout(graphLayoutOptions(graphScopeData(state.graphContext))).run();
+      filterGraph();
     }
     if (action === "open-graph-book") {
       closeGraphModal();
@@ -7456,6 +7700,10 @@
   }
 
   async function onChange(event) {
+    if (event.target.matches('[data-wr-action="graph-scope"]')) {
+      const value = event.target.value;
+      openGraph({ ...state.graphContext, scope: value.startsWith("group:") ? "group" : value, groupId: value.startsWith("group:") ? value.slice(6) : "" }, true);
+    }
     if (event.target.matches('[data-wr-action="graph-filter"]')) filterGraph();
     if (event.target.matches("[data-wr-reading-level-select]")) {
       try {

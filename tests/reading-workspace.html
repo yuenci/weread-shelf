@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>主题阅读 · 本地样例</title>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.34.2/dist/cytoscape.min.js"></script>
+<style>body{margin:0;background:#f6f7f9;font:16px system-ui;padding:36px} .shelf_list{display:flex;gap:30px}.shelfBook{width:128px}.shelfBook img{width:120px;height:170px} .title{margin-top:10px}</style>
+<h1>主题阅读 · 本地样例</h1><p>使用独立预览域名中的虚构书籍。无云同步。</p><main class="shelf_list"></main>
+<script>
+(async () => {
+  if (!['127.0.0.1', 'localhost'].includes(location.hostname)) throw new Error('Local preview only');
+  const cover = (i) => 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="230"><rect width="160" height="230" fill="${['#20435c','#626b44','#735b70','#af7048'][i%4]}"/><text x="20" y="65" fill="white" font-size="19">READING</text><text x="20" y="95" fill="white" font-size="17">BOOK ${i+1}</text></svg>`);
+  const books = {}, notes = {};
+  const now = '2026-09-06T00:00:00.000Z';
+  for (let i=0;i<24;i++) {
+    const id = `sample-${i}`;
+    books[id] = {id,title:i === 0 ? 'Reading_And_Thinking_中英对照' : `阅读路径 ${i+1}`,author:'示例作者',normalizedTitle:'',coverUrl:cover(i),readerUrl:i<3 ? `${location.origin}/reader.html` : '',detailUrl:'',source:'manual',createdAt:now,updatedAt:now};
+    books[id].normalizedTitle=books[id].title.toLowerCase();
+  }
+  notes['sample-0'] = {note:'一本书如何引向另一本书？这段文字用于检验中文排版。我们从最初的疑问出发，沿着阅读发现新的问题，也重新理解之前的看法。\n长上下文应当清晰可读，并且能够展开查看完整内容。重复观察、解释、验证，然后继续阅读。'.repeat(2),question:'哪些看法得到了修正？',updatedAt:now};
+  const ref = i => ({nodeId:`node-${i}`,bookId:`sample-${i}`,title:books[`sample-${i}`].title,normalizedTitle:books[`sample-${i}`].normalizedTitle});
+  const relations = Array.from({length:20},(_,i)=>({id:`edge-${i}`,fromBookId:'sample-0',toBookId:`sample-${i+1}`,from:ref(0),to:ref(i+1),type:['extended-reading','author-citation','question-driven'][i%3],reason:`从同一问题走向第 ${i+2} 本书，比较不同作者的解释，并验证它们是否适用于现实。`,createdAt:now,updatedAt:now}));
+  relations.push({id:'edge-other',fromBookId:'sample-22',toBookId:'sample-23',from:ref(22),to:ref(23),type:'extended-reading',reason:'一个独立的阅读主题。',createdAt:now,updatedAt:now});
+  const db = await new Promise((resolve,reject)=>{const r=indexedDB.open('weread_local_topic_shelf_db',1);r.onupgradeneeded=()=>r.result.createObjectStore('kv',{keyPath:'key'});r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+  const tx = db.transaction('kv','readwrite'), store=tx.objectStore('kv');
+  for (const [key,value] of Object.entries({weread_local_library_books_v1:books,weread_local_topic_shelf_groups_v1:[{id:'sample-topic',name:'阅读如何改变理解',description:'从疑问出发，记录一本书如何引出下一本书。',bookIds:Object.keys(books),createdAt:now,updatedAt:now},{id:'empty-topic',name:'尚未建立关系的主题',description:'检查空状态及切换范围',bookIds:[],createdAt:now,updatedAt:now}],weread_local_book_context_notes_v1:notes,weread_local_reading_relations_v1:relations,weread_cloud_sync_config_v1:{enabled:false},weread_obsidian_catalog_cache_v1:{books:[],contexts:{},stats:{total:0,inShelf:0,notInShelf:0,withContext:0},resolvedAt:now}})) store.put({key,value});
+  await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});db.close();
+  history.replaceState(null,'','/web/shelf');
+  const script=document.createElement('script');script.src=`/weread-local-topic-shelf.user.js?preview=${Date.now()}`;document.body.appendChild(script);
+})();
+</script>
+</html>
