@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.8
+// @version      0.6.9
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -12,7 +12,7 @@
 // @connect      workers.dev
 // @connect      res.weread.qq.com
 // @connect      cdn.weread.qq.com
-// @connect      *.tencent-cloud.com
+// @connect      tencent-cloud.com
 // ==/UserScript==
 
 (function () {
