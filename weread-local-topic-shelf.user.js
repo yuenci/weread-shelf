@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.6.9
+// @version      0.7.0
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -167,6 +167,9 @@
   const DB_NAME = "weread_local_topic_shelf_db";
   const DB_VERSION = 1;
   const DB_STORE = "kv";
+  const GRAPH_COVER_CACHE_PREFIX = "weread_graph_cover_cache_v1:";
+  const GRAPH_COVER_CACHE_LIMIT = 300;
+  const GRAPH_COVER_PREWARM_CONCURRENCY = 3;
 
   function cloneJson(value) {
     return JSON.parse(JSON.stringify(value));
@@ -290,6 +293,24 @@
   async function dbSet(key, value) {
     const tx = state.db.transaction(DB_STORE, "readwrite");
     tx.objectStore(DB_STORE).put({ key, value: cloneJson(value) });
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  async function dbRecordsByPrefix(prefix) {
+    const tx = state.db.transaction(DB_STORE, "readonly");
+    const range = IDBKeyRange.bound(prefix, `${prefix}\uffff`);
+    return requestToPromise(tx.objectStore(DB_STORE).getAll(range));
+  }
+
+  async function dbDeleteMany(keys) {
+    if (!keys.length) return;
+    const tx = state.db.transaction(DB_STORE, "readwrite");
+    const store = tx.objectStore(DB_STORE);
+    keys.forEach((key) => store.delete(key));
     await new Promise((resolve, reject) => {
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
@@ -6480,6 +6501,8 @@
   }
 
   const graphCoverCache = new Map();
+  let graphCoverPruneTimer = 0;
+  let graphCoverPrewarmScheduled = false;
 
   function requiresGraphCoverProxy(value) {
     try {
@@ -6494,10 +6517,63 @@
     }
   }
 
-  function graphCoverDataUrl(url) {
-    if (!requiresGraphCoverProxy(url)) return Promise.resolve(url);
-    if (graphCoverCache.has(url)) return graphCoverCache.get(url);
-    const pending = new Promise((resolve) => {
+  function graphCoverCacheKey(url) {
+    return `${GRAPH_COVER_CACHE_PREFIX}${sha256Fallback(String(url || ""))}`;
+  }
+
+  function isGraphCoverDataUrl(value) {
+    return /^data:image\/[a-z0-9.+-]+(?:;[^,]*)?,/i.test(String(value || ""));
+  }
+
+  async function loadPersistedGraphCover(url) {
+    if (!state.db) return "";
+    try {
+      const entry = await dbGet(graphCoverCacheKey(url), null);
+      return entry && entry.url === url && isGraphCoverDataUrl(entry.image)
+        ? entry.image
+        : "";
+    } catch (error) {
+      console.warn("[WeRead Local Topic Shelf] Failed to read graph cover cache:", error);
+      return "";
+    }
+  }
+
+  async function pruneGraphCoverCache() {
+    if (!state.db) return;
+    const records = await dbRecordsByPrefix(GRAPH_COVER_CACHE_PREFIX);
+    if (records.length <= GRAPH_COVER_CACHE_LIMIT) return;
+    const staleKeys = records
+      .sort(
+        (left, right) =>
+          timestampValue(right.value && right.value.cachedAt) -
+          timestampValue(left.value && left.value.cachedAt),
+      )
+      .slice(GRAPH_COVER_CACHE_LIMIT)
+      .map((record) => record.key);
+    await dbDeleteMany(staleKeys);
+  }
+
+  function scheduleGraphCoverCachePrune() {
+    window.clearTimeout(graphCoverPruneTimer);
+    graphCoverPruneTimer = window.setTimeout(() => {
+      pruneGraphCoverCache().catch((error) => {
+        console.warn("[WeRead Local Topic Shelf] Failed to prune graph cover cache:", error);
+      });
+    }, 800);
+  }
+
+  async function persistGraphCover(url, image) {
+    if (!state.db || !isGraphCoverDataUrl(image)) return;
+    await dbSet(graphCoverCacheKey(url), {
+      url,
+      image,
+      cachedAt: nowIso(),
+    });
+    scheduleGraphCoverCachePrune();
+  }
+
+  function downloadGraphCoverDataUrl(url) {
+    return new Promise((resolve) => {
       GM_xmlhttpRequest({
         method: "GET",
         url,
@@ -6533,6 +6609,41 @@
         },
       });
     });
+  }
+
+  async function resolveGraphCoverDataUrl(
+    url,
+    load = loadPersistedGraphCover,
+    download = downloadGraphCoverDataUrl,
+    save = persistGraphCover,
+  ) {
+    if (!requiresGraphCoverProxy(url)) return url;
+    try {
+      const cached = await load(url);
+      if (isGraphCoverDataUrl(cached)) return cached;
+    } catch (error) {
+      console.warn("[WeRead Local Topic Shelf] Failed to load cached graph cover:", error);
+    }
+
+    let image = url;
+    try {
+      image = await download(url);
+    } catch (error) {
+      return url;
+    }
+    if (!isGraphCoverDataUrl(image)) return url;
+    try {
+      await save(url, image);
+    } catch (error) {
+      console.warn("[WeRead Local Topic Shelf] Failed to persist graph cover:", error);
+    }
+    return image;
+  }
+
+  function graphCoverDataUrl(url) {
+    if (!requiresGraphCoverProxy(url)) return Promise.resolve(url);
+    if (graphCoverCache.has(url)) return graphCoverCache.get(url);
+    const pending = resolveGraphCoverDataUrl(url);
     graphCoverCache.set(url, pending);
     pending.then((image) => {
       if (!image || image === url) {
@@ -6542,6 +6653,64 @@
       }
     });
     return pending;
+  }
+
+  async function hydrateGraphCoverImages(graph, nodes, loader = graphCoverDataUrl) {
+    await Promise.all(
+      nodes.map(async (node) => {
+        if (!requiresGraphCoverProxy(node.cover)) return;
+        let image = "";
+        try {
+          image = await loader(node.cover);
+        } catch (error) {
+          return;
+        }
+        if (!isGraphCoverDataUrl(image) || state.graph !== graph || graph.destroyed()) return;
+        const element = graph.getElementById(node.id);
+        if (element && element.length) element.data("image", image);
+      }),
+    );
+  }
+
+  async function prewarmGraphCoverImages(loader = graphCoverDataUrl) {
+    const urls = [
+      ...new Set(
+        graphScopeData({ scope: "all" }).nodes
+          .map((node) => node.cover)
+          .filter(requiresGraphCoverProxy),
+      ),
+    ];
+    let nextIndex = 0;
+    const workers = Array.from(
+      { length: Math.min(GRAPH_COVER_PREWARM_CONCURRENCY, urls.length) },
+      async () => {
+        while (nextIndex < urls.length) {
+          const url = urls[nextIndex];
+          nextIndex += 1;
+          try {
+            await loader(url);
+          } catch (error) {
+            // A failed cover remains eligible for a later retry.
+          }
+        }
+      },
+    );
+    await Promise.all(workers);
+  }
+
+  function scheduleGraphCoverPrewarm() {
+    if (graphCoverPrewarmScheduled) return;
+    graphCoverPrewarmScheduled = true;
+    const run = () => {
+      prewarmGraphCoverImages().catch((error) => {
+        console.warn("[WeRead Local Topic Shelf] Failed to prewarm graph covers:", error);
+      });
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(run, { timeout: 3000 });
+    } else {
+      window.setTimeout(run, 1500);
+    }
   }
 
   async function preloadGraphCoverImages(data, loader = graphCoverDataUrl) {
@@ -6599,12 +6768,12 @@
 
   function initializeGraph(data) {
     const container = document.querySelector("[data-wr-graph-canvas]");
-    if (!container) return;
+    if (!container) return null;
     removeGraphLoadingIndicator(container);
     const cytoscapeFactory = window.cytoscape;
     if (typeof cytoscapeFactory !== "function") {
       container.innerHTML = '<div class="wr-topic-graph-error">关系图库未能加载。书籍上下文中的关系卡片仍可正常使用。</div>';
-      return;
+      return null;
     }
     if (state.graph) state.graph.destroy();
     state.graph = cytoscapeFactory({
@@ -6681,6 +6850,7 @@
     state.graph.on("tap", "edge", (event) =>
       updateGraphInspector("edge", event.target.data()),
     );
+    return state.graph;
   }
 
   function openGraph(context = { scope: "all" }) {
@@ -6716,15 +6886,19 @@
       </div>`;
     if (!safeAppend(getMountRoot(), modal, "graph modal")) return;
     if (data.relations.length) {
-      window.setTimeout(async () => {
-        const preparedData = await preloadGraphCoverImages(data);
+      window.setTimeout(() => {
         if (
           !modal.isConnected ||
           document.getElementById("wr-topic-graph-modal") !== modal
         ) {
           return;
         }
-        initializeGraph(preparedData);
+        const graph = initializeGraph(data);
+        if (graph) {
+          hydrateGraphCoverImages(graph, data.nodes).catch((error) => {
+            console.warn("[WeRead Local Topic Shelf] Failed to hydrate graph covers:", error);
+          });
+        }
       }, 0);
     }
   }
@@ -7351,6 +7525,7 @@
     };
 
     maintainShelfRoute();
+    if (isShelfEnhancementRoute()) scheduleGraphCoverPrewarm();
     if (isShelfEnhancementRoute() && isCloudConfigured()) scheduleCloudSync(300);
 
     window.setInterval(() => {
