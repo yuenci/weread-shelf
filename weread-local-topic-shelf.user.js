@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.8.2
+// @version      0.8.3
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -7403,6 +7403,12 @@
     return !["INPUT", "TEXTAREA", "SELECT", "OPTION"].includes(actionEl.tagName);
   }
 
+  function prepareShelfGroupOpen(groupId) {
+    state.panelTab = "groups";
+    state.selectedGroupId = String(groupId || "");
+    state.formMode = "";
+  }
+
   async function onClick(event) {
     if (!isShelfEnhancementRoute()) return;
     const actionEl = event.target.closest("[data-wr-action]");
@@ -7523,9 +7529,13 @@
         }
       }
     }
-    if (action === "select-group" || action === "open-group") {
+    if (action === "select-group") {
       state.selectedGroupId = actionEl.dataset.groupId;
       state.formMode = "";
+      await openPanel();
+    }
+    if (action === "open-group") {
+      prepareShelfGroupOpen(actionEl.dataset.groupId);
       await openPanel();
     }
     if (action === "edit-group") {

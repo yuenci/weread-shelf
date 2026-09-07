@@ -11,7 +11,7 @@ function load(overrides = {}) {
   Object.assign(context, overrides);
   context.window = context;
   context.location = { origin: "https://weread.qq.com", pathname: "/web/shelf" };
-  const instrumented = source.replace(/\n  init\(\);\n\}\)\(\);\s*$/u, `\n globalThis.api = { ${names.join(", ")} };\n})();`);
+  const instrumented = source.replace(/\n  init\(\);\n\}\)\(\);\s*$/u, `\n globalThis.api = { ${names.join(", ")}, prepareShelfGroupOpen: typeof prepareShelfGroupOpen === "function" ? prepareShelfGroupOpen : undefined };\n})();`);
   assert.notEqual(instrumented, source, "test harness must suppress production startup");
   runInNewContext(instrumented, context);
   return context.api;
@@ -204,4 +204,18 @@ test("graded reading keeps exactly one category filter row and no statistic card
   assert.doesNotMatch(html, /wr-topic-graded-stats|阅读分级统计/);
   assert.equal((html.match(/data-wr-action="level-filter"/g) || []).length, 5);
   assert.match(html, /筛选阅读分级/);
+});
+
+test("opening a shelf topic switches back to the groups tab and selects that topic", () => {
+  const api = load();
+  api.state.panelTab = "catalog";
+  api.state.selectedGroupId = "old-group";
+  api.state.formMode = "edit";
+
+  assert.equal(typeof api.prepareShelfGroupOpen, "function");
+  api.prepareShelfGroupOpen("history");
+
+  assert.equal(api.state.panelTab, "groups");
+  assert.equal(api.state.selectedGroupId, "history");
+  assert.equal(api.state.formMode, "");
 });
