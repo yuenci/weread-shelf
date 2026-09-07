@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.8.0
+// @version      0.8.1
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -6577,11 +6577,15 @@
 
   function graphLayoutPositions(data) {
     const adjacent = new Map(data.nodes.map((node) => [node.id, new Set()]));
+    const outgoing = new Map(data.nodes.map((node) => [node.id, new Set()]));
+    const incoming = new Map(data.nodes.map((node) => [node.id, new Set()]));
     for (const relation of data.relations) {
       const from = relation.from.nodeId, to = relation.to.nodeId;
       if (!adjacent.has(from) || !adjacent.has(to)) continue;
       adjacent.get(from).add(to);
       adjacent.get(to).add(from);
+      outgoing.get(from).add(to);
+      incoming.get(to).add(from);
     }
     const remaining = new Set(adjacent.keys());
     const components = [];
@@ -6597,20 +6601,67 @@
       components.push(members);
     }
     components.sort((a, b) => b.length - a.length);
-    const targetWidth = Math.max(450, Math.ceil(Math.sqrt(data.nodes.length * 150 * 180 * 1.35)));
+    // Reserve an entire vertical lane for each subtree. Folding a BFS list into
+    // a grid mixes generations and makes otherwise planar trees cross.
+    const blocks = components.map((members) => {
+      const children = new Map(members.map(id => [id, []]));
+      const depths = new Map(), order = [], roots = [];
+      const candidates = [...members.filter(id => !incoming.get(id).size), ...members];
+      for (const root of candidates) {
+        if (depths.has(root)) continue;
+        roots.push(root);
+        const stack = [{ id: root, parent: null, depth: 0 }];
+        while (stack.length) {
+          const { id, parent, depth } = stack.pop();
+          if (depths.has(id)) continue; // Shared descendants and cycles stay finite.
+          depths.set(id, depth);
+          order.push(id);
+          if (parent !== null) children.get(parent).push(id);
+          for (const next of [...outgoing.get(id)].reverse()) {
+            if (!depths.has(next)) stack.push({ id: next, parent: id, depth: depth + 1 });
+          }
+        }
+      }
+      // Shared recommendations must appear after every prerequisite, not just
+      // the first parent visited. Cyclic components retain the finite forest.
+      const pending = new Map(members.map(id => [id, incoming.get(id).size]));
+      const ranks = new Map(members.map(id => [id, 0]));
+      const queue = members.filter(id => !pending.get(id));
+      for (let index = 0; index < queue.length; index += 1) {
+        const id = queue[index];
+        for (const next of outgoing.get(id)) {
+          ranks.set(next, Math.max(ranks.get(next), ranks.get(id) + 1));
+          pending.set(next, pending.get(next) - 1);
+          if (!pending.get(next)) queue.push(next);
+        }
+      }
+      if (queue.length === members.length) for (const id of members) depths.set(id, ranks.get(id));
+      const spans = new Map();
+      for (const id of [...order].reverse()) spans.set(id, Math.max(1, children.get(id).reduce((sum, child) => sum + spans.get(child), 0)));
+      const points = Object.create(null);
+      let offset = 0;
+      for (const root of roots) {
+        const stack = [{ id: root, start: offset }];
+        offset += spans.get(root);
+        while (stack.length) {
+          const { id, start } = stack.pop();
+          points[id] = { x: depths.get(id) * 260 + 100, y: (start + spans.get(id) / 2) * 200 };
+          let childStart = start;
+          for (const child of children.get(id)) {
+            stack.push({ id: child, start: childStart });
+            childStart += spans.get(child);
+          }
+        }
+      }
+      return { points, width: Math.max(...depths.values()) * 260 + 200, height: offset * 200 };
+    });
+    const targetWidth = Math.max(800, Math.sqrt(blocks.reduce((area, block) => area + block.width * block.height, 0) * 1.4));
     const positions = Object.create(null);
     let x = 0, y = 0, rowHeight = 0;
-    for (const members of components) {
-      const columns = Math.ceil(Math.sqrt(members.length));
-      const width = columns * 150, height = Math.ceil(members.length / columns) * 180;
-      if (x && x + width > targetWidth) { x = 0; y += rowHeight + 60; rowHeight = 0; }
-      members.forEach((id, index) => {
-        const row = Math.floor(index / columns);
-        // Alternate direction to keep successive path nodes near each other.
-        const column = row % 2 ? columns - 1 - index % columns : index % columns;
-        positions[id] = { x: x + column * 150 + 75, y: y + row * 180 + 90 };
-      });
-      x += width + 60;
+    for (const { points, width, height } of blocks) {
+      if (x && x + width > targetWidth) { x = 0; y += rowHeight + 120; rowHeight = 0; }
+      for (const [id, point] of Object.entries(points)) positions[id] = { x: x + point.x, y: y + point.y };
+      x += width + 120;
       rowHeight = Math.max(rowHeight, height);
     }
     return positions;
@@ -6646,11 +6697,30 @@
     return "全库阅读关系";
   }
 
+  function graphBookLabel(title) {
+    const characters = Array.from(String(title || "").replace(/\s+/gu, " ").trim());
+    const lines = [];
+    let index = 0;
+    while (index < characters.length && lines.length < 3) {
+      let line = "", width = 0;
+      // Conservative character budget at 13px: 12 CJK or 24 ASCII per line.
+      const budget = lines.length === 2 ? 22 : 24;
+      while (index < characters.length) {
+        const character = characters[index], units = /[\x00-\x7f]/u.test(character) ? 1 : 2;
+        if (width + units > budget) break;
+        line += character; width += units; index += 1;
+      }
+      lines.push(line.trim() + (lines.length === 2 && index < characters.length ? "…" : ""));
+    }
+    return lines.join("\n");
+  }
+
   function graphElements(data) {
     const nodes = data.nodes.map((node) => ({
       group: "nodes",
       data: {
         ...node,
+        graphLabel: graphBookLabel(node.label || node.title),
         image: node.graphImage || node.cover || "none",
       },
       classes: node.outside ? "outside" : "",
@@ -6966,11 +7036,12 @@
             "background-fit": "cover",
             "border-width": 2,
             "border-color": "#8aaee0",
-            label: "data(label)",
+            label: "data(graphLabel)",
             color: "#1f2933",
             "font-size": 13,
             "text-wrap": "wrap",
-            "text-max-width": 132,
+            "text-max-width": 1000,
+            "line-height": 1.3,
             "text-valign": "bottom",
             "text-margin-y": 10,
           },
@@ -6981,11 +7052,13 @@
           selector: "edge",
           style: {
             width: 2,
-            "curve-style": "bezier",
+            "curve-style": "taxi",
+            "taxi-direction": "horizontal",
+            "taxi-turn": "50%",
             "target-arrow-shape": "triangle",
             "line-color": "#2f80ed",
             "target-arrow-color": "#2f80ed",
-            label: "data(label)",
+            label: "",
             color: "#526070",
             "font-size": 9,
             "text-background-color": "#fff",
@@ -6995,12 +7068,15 @@
         },
         { selector: "edge.author-citation", style: { "line-color": "#e68724", "target-arrow-color": "#e68724" } },
         { selector: "edge.question-driven", style: { "line-color": "#2d9a5b", "target-arrow-color": "#2d9a5b" } },
+        { selector: "edge:selected, edge.wr-graph-hover", style: { label: "data(label)", width: 3 } },
         { selector: ".wr-graph-hidden", style: { display: "none" } },
         { selector: ".wr-graph-dimmed", style: { opacity: 0.15 } },
         { selector: "edge.wr-graph-highlight", style: { width: 4 } },
       ],
     });
     let lastTap = { id: "", at: 0 };
+    state.graph.on("mouseover", "edge", (event) => event.target.addClass("wr-graph-hover"));
+    state.graph.on("mouseout", "edge", (event) => event.target.removeClass("wr-graph-hover"));
     state.graph.on("tap", "node", (event) => {
       const node = event.target;
       const item = node.data();
@@ -7199,10 +7275,12 @@
     graph.fit(visible, 48);
     // Keep titles readable in dense scopes; the fit button still offers an overview.
     if (graph.zoom() < 0.85) {
-      const anchor = visible.nodes().sort((a, b) => a.position("y") - b.position("y") || a.position("x") - b.position("x"))[0];
-      if (!anchor) return;
+      const nodes = visible.nodes();
+      if (!nodes.length) return;
+      const left = Math.min(...nodes.map(node => node.position("x")));
+      const top = Math.min(...nodes.map(node => node.position("y")));
       graph.zoom(0.85);
-      graph.pan({ x: 80 - anchor.position("x") * 0.85, y: 80 - anchor.position("y") * 0.85 });
+      graph.pan({ x: 100 - left * 0.85, y: 80 - top * 0.85 });
     }
   }
 

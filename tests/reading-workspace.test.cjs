@@ -6,7 +6,7 @@ const source = readFileSync(require("node:path").join(__dirname, "../weread-loca
 
 function load() {
   const names = ["state", "normalizeLibraryBook", "reconcileShelfBook", "bookPresentation", "renderGroupDetail", "renderGroupList", "gradedReadingListHtml", "renderLibraryView", "graphLayoutPositions", "filteredGraphData", "graphRelationListHtml", "graphScopeData", "buildLocalDataExport", "filteredLibraryBooks", "gradedReadingBooks"];
-  names.push("onClick");
+  names.push("onClick", "graphElements");
   const context = { console, URL, TextEncoder, TextDecoder, crypto: require("node:crypto").webcrypto, setTimeout, clearTimeout };
   context.window = context;
   context.location = { origin: "https://weread.qq.com", pathname: "/web/shelf" };
@@ -104,6 +104,39 @@ test("graph layout handles cycles and unknown endpoints", () => {
   const data = graph();
   data.relations.push({ from: { nodeId: "c" }, to: { nodeId: "a" } }, { from: { nodeId: "missing" }, to: { nodeId: "a" } });
   assert.deepEqual(Object.keys(api.graphLayoutPositions(data)).sort(), ["a", "b", "c"]);
+});
+
+test("multi-level recommendation trees preserve direction and separate whole subtrees", () => {
+  const api = load();
+  const pairs = [[0,1],[0,2],[0,3],[0,4],[1,5],[1,6],[2,7],[7,8],[3,9],[9,10]];
+  const nodes = Array.from({length:11}, (_,i)=>({id:String(i)}));
+  const relations = pairs.map(([a,b])=>({from:{nodeId:String(a)},to:{nodeId:String(b)}}));
+  const p = api.graphLayoutPositions({nodes,relations});
+  for (const [a,b] of pairs) assert.ok(p[b].x > p[a].x, `recommendation ${a} -> ${b} must move right`);
+  const descendants = id => [id, ...pairs.filter(([a])=>a===id).flatMap(([,b])=>descendants(b))];
+  for (let a=1; a<=4; a++) for(let b=a+1;b<=4;b++) {
+    const ay=descendants(a).map(id=>p[id].y), by=descendants(b).map(id=>p[id].y);
+    assert.ok(Math.max(...ay)+180<=Math.min(...by) || Math.max(...by)+180<=Math.min(...ay), 'sibling subtrees need separate lanes');
+  }
+});
+
+test("graph labels bound Chinese and unbroken English titles while retaining full titles", () => {
+  const api = load();
+  for (const title of ['技术社会与现代文明的复杂关系以及技术理性如何改变人类的生活方式'.repeat(3), 'The-Technological-Society-Jacques-Ellul'.repeat(4)]) {
+    const node = api.graphElements({nodes:[{id:'a',title,label:title}],relations:[]})[0].data;
+    const lines = node.graphLabel.split('\n');
+    assert.ok(lines.length <= 3);
+    assert.ok(lines.every(line=>Array.from(line).reduce((n,c)=>n+(/[\x00-\x7f]/.test(c)?1:2),0)<=24));
+    assert.ok(node.graphLabel.endsWith('…'));
+    assert.equal(node.title,title);
+    assert.equal(node.label,title);
+  }
+});
+
+test("shared recommendations follow all acyclic dependencies", () => {
+  const api = load(), pairs = [['a','c'],['a','b'],['b','c'],['b','d'],['d','c']];
+  const p = api.graphLayoutPositions({nodes:['a','b','c','d'].map(id=>({id})),relations:pairs.map(([a,b])=>({from:{nodeId:a},to:{nodeId:b}}))});
+  for(const [a,b] of pairs) assert.ok(p[b].x>p[a].x, `${a} -> ${b} must move right`);
 });
 
 test("embedded native controls and graph clicks are not intercepted as backdrop clicks", async () => {

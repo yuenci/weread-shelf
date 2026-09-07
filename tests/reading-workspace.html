@@ -18,8 +18,12 @@
     books[id].normalizedTitle=books[id].title.toLowerCase();
   }
   notes['sample-0'] = {note:'一本书如何引向另一本书？这段文字用于检验中文排版。我们从最初的疑问出发，沿着阅读发现新的问题，也重新理解之前的看法。\n长上下文应当清晰可读，并且能够展开查看完整内容。重复观察、解释、验证，然后继续阅读。'.repeat(2),question:'哪些看法得到了修正？',updatedAt:now};
+  books['sample-0'].title = '阅读与思考：一本书如何引出多级推荐关系并帮助我们理解复杂的世界';
+  books['sample-1'].title = '技术社会 The-Technological-Society-Jacques-Ellul';
+  books['sample-2'].title = '技术与时间（修订合卷本）（人文与社会译丛）';
   const ref = i => ({nodeId:`node-${i}`,bookId:`sample-${i}`,title:books[`sample-${i}`].title,normalizedTitle:books[`sample-${i}`].normalizedTitle});
-  const relations = Array.from({length:20},(_,i)=>({id:`edge-${i}`,fromBookId:'sample-0',toBookId:`sample-${i+1}`,from:ref(0),to:ref(i+1),type:['extended-reading','author-citation','question-driven'][i%3],reason:`从同一问题走向第 ${i+2} 本书，比较不同作者的解释，并验证它们是否适用于现实。`,createdAt:now,updatedAt:now}));
+  const pairs = [[0,1],[0,2],[0,3],[0,4],[1,5],[1,6],[2,7],[7,8],[3,9],[9,10],[11,12],[11,13],[11,14],[11,15],[16,17],[18,19],[20,21]];
+  const relations = pairs.map(([a,b],i)=>({id:`edge-${i}`,fromBookId:`sample-${a}`,toBookId:`sample-${b}`,from:ref(a),to:ref(b),type:['extended-reading','author-citation','question-driven'][i%3],reason:`从同一问题走向第 ${b+1} 本书，比较不同作者的解释，并验证它们是否适用于现实。`,createdAt:now,updatedAt:now}));
   relations.push({id:'edge-other',fromBookId:'sample-22',toBookId:'sample-23',from:ref(22),to:ref(23),type:'extended-reading',reason:'一个独立的阅读主题。',createdAt:now,updatedAt:now});
   const db = await new Promise((resolve,reject)=>{const r=indexedDB.open('weread_local_topic_shelf_db',1);r.onupgradeneeded=()=>r.result.createObjectStore('kv',{keyPath:'key'});r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
   const tx = db.transaction('kv','readwrite'), store=tx.objectStore('kv');
