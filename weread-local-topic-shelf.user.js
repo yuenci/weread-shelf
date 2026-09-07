@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.8.1
+// @version      0.8.2
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -1993,7 +1993,6 @@
 
       .wr-topic-graded-head,
       .wr-topic-graded-controls,
-      .wr-topic-graded-stats,
       .wr-topic-graded-filters {
         display: flex;
         align-items: center;
@@ -2010,41 +2009,6 @@
         margin: 4px 0 0;
         color: var(--wr-topic-muted);
         font-size: 12px;
-      }
-
-      .wr-topic-graded-stats {
-        margin-bottom: 14px;
-      }
-
-      .wr-topic-graded-stat {
-        min-width: 112px;
-        border: 0;
-        border-left: 3px solid #cad1dc;
-        padding: 6px 10px;
-        background: #fff;
-        color: inherit;
-        text-align: left;
-      }
-
-      .wr-topic-graded-stat:hover,
-      .wr-topic-graded-stat.active {
-        border-left-color: var(--wr-topic-blue);
-        background: rgba(47, 128, 237, .05);
-      }
-
-      .wr-topic-graded-stat strong,
-      .wr-topic-graded-stat span {
-        display: block;
-      }
-
-      .wr-topic-graded-stat strong {
-        font-size: 18px;
-      }
-
-      .wr-topic-graded-stat span {
-        margin-top: 2px;
-        color: var(--wr-topic-muted);
-        font-size: 11px;
       }
 
       .wr-topic-graded-controls {
@@ -5159,17 +5123,6 @@
             <p>按今晚可用的精力，选择合适的书继续阅读。</p>
           </div>
         </div>
-        <div class="wr-topic-graded-stats" aria-label="阅读分级统计">
-          ${filters
-            .slice(1)
-            .map(
-              ([value, label, count]) => `
-                <button class="wr-topic-graded-stat ${state.levelFilter === value ? "active" : ""}" type="button" data-wr-action="level-filter" data-filter="${value}">
-                  <strong>${count}</strong><span>${label}</span>
-                </button>`,
-            )
-            .join("")}
-        </div>
         <div class="wr-topic-graded-controls">
           <input class="wr-topic-input wr-topic-graded-search" type="search" data-wr-action="filter-levels" placeholder="搜索书名或作者" value="${escapeHtml(state.levelQuery)}" autocomplete="off">
           <div class="wr-topic-graded-filters" role="group" aria-label="筛选阅读分级">
@@ -5928,8 +5881,8 @@
   }
 
   function closePanel() {
+    if (!closeNoteModal()) return;
     closeGraphModal();
-    closeNoteModal();
     const root = document.getElementById("wr-topic-panel-root");
     if (root) root.remove();
     state.formMode = "";
@@ -6270,12 +6223,17 @@
     }
   }
 
-  function closeNoteModal() {
+  function closeNoteModal({ skipConfirmation = false } = {}) {
     const modal = document.getElementById("wr-topic-note-modal");
+    const form = modal?.querySelector('[data-wr-form="note"]');
+    const hasContent = form && [form.elements.note, form.elements.question]
+      .some(field => field && !field.readOnly && field.value.trim());
+    if (!skipConfirmation && hasContent && !confirm("编辑框中有内容，确定离开吗？未保存的修改将不会保留。")) return false;
     if (modal) modal.remove();
     state.noteNavigationStack = [];
     state.noteDrafts = {};
     mountWorkspaceLayers();
+    return true;
   }
 
   function relationCandidateBooks(input) {
@@ -7331,7 +7289,7 @@
     }
 
     await saveNotes(notes);
-    closeNoteModal();
+    closeNoteModal({ skipConfirmation: true });
     refreshShelf();
   }
 
@@ -7340,7 +7298,7 @@
     markDeleted("notes", bookId);
     delete notes[bookId];
     await saveNotes(notes);
-    closeNoteModal();
+    closeNoteModal({ skipConfirmation: true });
     refreshShelf();
   }
 

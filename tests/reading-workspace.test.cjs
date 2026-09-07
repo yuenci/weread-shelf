@@ -4,10 +4,11 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const source = readFileSync(require("node:path").join(__dirname, "../weread-local-topic-shelf.user.js"), "utf8");
 
-function load() {
+function load(overrides = {}) {
   const names = ["state", "normalizeLibraryBook", "reconcileShelfBook", "bookPresentation", "renderGroupDetail", "renderGroupList", "gradedReadingListHtml", "renderLibraryView", "graphLayoutPositions", "filteredGraphData", "graphRelationListHtml", "graphScopeData", "buildLocalDataExport", "filteredLibraryBooks", "gradedReadingBooks"];
-  names.push("onClick", "graphElements");
+  names.push("onClick", "graphElements", "closeNoteModal", "closePanel", "onKeydown", "renderGradedReadingView");
   const context = { console, URL, TextEncoder, TextDecoder, crypto: require("node:crypto").webcrypto, setTimeout, clearTimeout };
+  Object.assign(context, overrides);
   context.window = context;
   context.location = { origin: "https://weread.qq.com", pathname: "/web/shelf" };
   const instrumented = source.replace(/\n  init\(\);\n\}\)\(\);\s*$/u, `\n globalThis.api = { ${names.join(", ")} };\n})();`);
@@ -147,4 +148,60 @@ test("embedded native controls and graph clicks are not intercepted as backdrop 
     const event = { target: { tagName, closest: () => overlay }, preventDefault() { assert.fail(`${tagName} default was canceled`); }, stopPropagation() { assert.fail(`${tagName} propagation was stopped`); } };
     await api.onClick(event);
   }
+});
+
+
+function noteDialogHarness(note, question = "", answer = false, readOnly = false) {
+  let removed = false, panelRemoved = false, confirms = 0;
+  const form = { elements: { note: { value: note, readOnly }, question: { value: question, readOnly } } };
+  const modal = { querySelector: () => form, remove() { removed = true; } };
+  const panel = { remove() { panelRemoved = true; } };
+  const document = {
+    getElementById: id => id === "wr-topic-note-modal" ? (removed ? null : modal) : id === "wr-topic-panel-root" ? panel : null,
+    querySelector: () => null, querySelectorAll: () => [],
+  };
+  const api = load({ document, confirm: () => { confirms++; return answer; } });
+  api.state.noteDrafts = { a: { note } };
+  return { api, form, result: () => ({ removed, panelRemoved, confirms }) };
+}
+
+test("canceling close keeps nonempty context or question and its modal", () => {
+  for (const values of [["正在编辑", ""], ["", "尚未回答的问题"]]) {
+    const h = noteDialogHarness(...values);
+    assert.equal(h.api.closeNoteModal(), false);
+    assert.deepEqual(h.result(), { removed: false, panelRemoved: false, confirms: 1 });
+    assert.equal(h.form.elements.note.value, values[0]);
+    assert.ok(h.api.state.noteDrafts.a);
+  }
+});
+
+test("accepting close leaves, while blank or readonly content needs no confirmation", () => {
+  for (const [note, question, answer, readOnly, expected] of [["内容", "", true, false, 1], [" \n", "\t", false, false, 0], ["Obsidian 内容", "问题", false, true, 0]]) {
+    const h = noteDialogHarness(note, question, answer, readOnly);
+    assert.equal(h.api.closeNoteModal(), true);
+    assert.deepEqual(h.result(), { removed: true, panelRemoved: false, confirms: expected });
+  }
+});
+
+test("Escape and closing the outer workspace cannot bypass context confirmation", () => {
+  for (const close of [api => api.onKeydown({key:"Escape"}), api => api.closePanel()]) {
+    const h = noteDialogHarness("保留这段内容");
+    close(h.api);
+    assert.deepEqual(h.result(), { removed: false, panelRemoved: false, confirms: 1 });
+  }
+});
+
+test("successful save or delete can close without a redundant leave confirmation", () => {
+  const h = noteDialogHarness("已处理的内容");
+  assert.equal(h.api.closeNoteModal({ skipConfirmation: true }), true);
+  assert.equal(h.result().confirms, 0);
+  assert.equal(h.result().removed, true);
+});
+
+test("graded reading keeps exactly one category filter row and no statistic cards", () => {
+  const api = load();
+  const html = api.renderGradedReadingView();
+  assert.doesNotMatch(html, /wr-topic-graded-stats|阅读分级统计/);
+  assert.equal((html.match(/data-wr-action="level-filter"/g) || []).length, 5);
+  assert.match(html, /筛选阅读分级/);
 });
