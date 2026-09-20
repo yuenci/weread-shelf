@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.8.4
+// @version      0.8.5
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -6167,25 +6167,43 @@
     };
   }
 
+  function bookNoteInitialValues(bookId) {
+    const note = getNotes()[bookId] || { note: "", question: "" };
+    const obsidian = getObsidianContext(bookId);
+    const obsidianAuthoritative = hasObsidianReadingContext(obsidian);
+    return {
+      note: String(obsidianAuthoritative ? obsidian.context || "" : note.note || ""),
+      question: String(obsidianAuthoritative ? obsidian.question || "" : note.question || ""),
+      obsidian,
+      obsidianAuthoritative,
+    };
+  }
+
+  function noteFormHasUnsavedChanges(form) {
+    if (!form) return false;
+    const initialValues = form.wrInitialValues || { note: "", question: "" };
+    return ["note", "question"].some((name) => {
+      const field = form.elements[name];
+      return field && !field.readOnly && String(field.value || "") !== String(initialValues[name] || "");
+    });
+  }
+
   function renderBookNoteContent(bookId) {
     const book = findBook(bookId);
     if (!book) return "";
     const readerUrl = readerUrlForBook(book);
-    const notes = getNotes();
-    const note = notes[bookId] || { note: "", question: "" };
     const draft = state.noteDrafts[bookId] || {};
-    const obsidian = getObsidianContext(bookId);
-    const obsidianAuthoritative = hasObsidianReadingContext(obsidian);
+    const { note, question, obsidian, obsidianAuthoritative } = bookNoteInitialValues(bookId);
     const contextValue = obsidianAuthoritative
-      ? obsidian.context
+      ? note
       : Object.prototype.hasOwnProperty.call(draft, "note")
         ? draft.note
-        : note.note;
+        : note;
     const questionValue = obsidianAuthoritative
-      ? obsidian.question
+      ? question
       : Object.prototype.hasOwnProperty.call(draft, "question")
         ? draft.question
-        : note.question;
+        : question;
     return `
       <div class="wr-topic-modal-card wr-topic-note-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(text.bookNoteTitle)}">
         <div class="wr-topic-modal-head">
@@ -6251,6 +6269,14 @@
       if (!safeAppend(getMountRoot(), modal, "note modal")) return;
     }
     modal.innerHTML = renderBookNoteContent(bookId);
+    const form = modal.querySelector('[data-wr-form="note"]');
+    if (form) {
+      const initialValues = bookNoteInitialValues(bookId);
+      form.wrInitialValues = {
+        note: initialValues.note,
+        question: initialValues.question,
+      };
+    }
     mountWorkspaceLayers();
   }
 
@@ -6269,9 +6295,8 @@
   function closeNoteModal({ skipConfirmation = false } = {}) {
     const modal = document.getElementById("wr-topic-note-modal");
     const form = modal?.querySelector('[data-wr-form="note"]');
-    const hasContent = form && [form.elements.note, form.elements.question]
-      .some(field => field && !field.readOnly && field.value.trim());
-    if (!skipConfirmation && hasContent && !confirm("编辑框中有内容，确定离开吗？未保存的修改将不会保留。")) return false;
+    const hasUnsavedChanges = noteFormHasUnsavedChanges(form);
+    if (!skipConfirmation && hasUnsavedChanges && !confirm("编辑框中有未保存的修改，确定离开吗？修改将不会保留。")) return false;
     if (modal) modal.remove();
     state.noteNavigationStack = [];
     state.noteDrafts = {};

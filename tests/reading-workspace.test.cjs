@@ -174,9 +174,20 @@ test("embedded native controls and graph clicks are not intercepted as backdrop 
 });
 
 
-function noteDialogHarness(note, question = "", answer = false, readOnly = false) {
+function noteDialogHarness({
+  note = "",
+  question = "",
+  savedNote = "",
+  savedQuestion = "",
+  answer = false,
+  readOnly = false,
+} = {}) {
   let removed = false, panelRemoved = false, confirms = 0;
-  const form = { elements: { note: { value: note, readOnly }, question: { value: question, readOnly } } };
+  const form = {
+    dataset: { bookId: "a" },
+    elements: { note: { value: note, readOnly }, question: { value: question, readOnly } },
+    wrInitialValues: { note: savedNote, question: savedQuestion },
+  };
   const modal = { querySelector: () => form, remove() { removed = true; } };
   const panel = { remove() { panelRemoved = true; } };
   const document = {
@@ -184,38 +195,53 @@ function noteDialogHarness(note, question = "", answer = false, readOnly = false
     querySelector: () => null, querySelectorAll: () => [],
   };
   const api = load({ document, confirm: () => { confirms++; return answer; } });
+  api.state.notes = { a: { note: savedNote, question: savedQuestion } };
   api.state.noteDrafts = { a: { note } };
   return { api, form, result: () => ({ removed, panelRemoved, confirms }) };
 }
 
-test("canceling close keeps nonempty context or question and its modal", () => {
-  for (const values of [["正在编辑", ""], ["", "尚未回答的问题"]]) {
-    const h = noteDialogHarness(...values);
+test("canceling close keeps changed context or question and its modal", () => {
+  for (const values of [
+    { note: "正在编辑", savedNote: "原有内容" },
+    { question: "尚未回答的问题", savedQuestion: "原有问题" },
+    { note: "", savedNote: "被清空的内容" },
+  ]) {
+    const h = noteDialogHarness(values);
     assert.equal(h.api.closeNoteModal(), false);
     assert.deepEqual(h.result(), { removed: false, panelRemoved: false, confirms: 1 });
-    assert.equal(h.form.elements.note.value, values[0]);
+    assert.equal(h.form.elements.note.value, values.note || "");
     assert.ok(h.api.state.noteDrafts.a);
   }
 });
 
-test("accepting close leaves, while blank or readonly content needs no confirmation", () => {
-  for (const [note, question, answer, readOnly, expected] of [["内容", "", true, false, 1], [" \n", "\t", false, false, 0], ["Obsidian 内容", "问题", false, true, 0]]) {
-    const h = noteDialogHarness(note, question, answer, readOnly);
+test("unchanged, empty, or readonly context closes without confirmation", () => {
+  for (const values of [
+    { note: "已有内容", question: "已有问题", savedNote: "已有内容", savedQuestion: "已有问题" },
+    {},
+    { note: "Obsidian 内容", question: "问题", readOnly: true },
+  ]) {
+    const h = noteDialogHarness(values);
     assert.equal(h.api.closeNoteModal(), true);
-    assert.deepEqual(h.result(), { removed: true, panelRemoved: false, confirms: expected });
+    assert.deepEqual(h.result(), { removed: true, panelRemoved: false, confirms: 0 });
   }
+});
+
+test("accepting the changed-context confirmation closes the modal", () => {
+  const h = noteDialogHarness({ note: "修改后", savedNote: "修改前", answer: true });
+  assert.equal(h.api.closeNoteModal(), true);
+  assert.deepEqual(h.result(), { removed: true, panelRemoved: false, confirms: 1 });
 });
 
 test("Escape and closing the outer workspace cannot bypass context confirmation", () => {
   for (const close of [api => api.onKeydown({key:"Escape"}), api => api.closePanel()]) {
-    const h = noteDialogHarness("保留这段内容");
+    const h = noteDialogHarness({ note: "保留这段修改", savedNote: "修改前" });
     close(h.api);
     assert.deepEqual(h.result(), { removed: false, panelRemoved: false, confirms: 1 });
   }
 });
 
 test("successful save or delete can close without a redundant leave confirmation", () => {
-  const h = noteDialogHarness("已处理的内容");
+  const h = noteDialogHarness({ note: "已处理的内容" });
   assert.equal(h.api.closeNoteModal({ skipConfirmation: true }), true);
   assert.equal(h.result().confirms, 0);
   assert.equal(h.result().removed, true);
