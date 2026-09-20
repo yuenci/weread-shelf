@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const source = readFileSync(require("node:path").join(__dirname, "../weread-local-topic-shelf.user.js"), "utf8");
 
 function load(overrides = {}) {
-  const names = ["state", "normalizeLibraryBook", "reconcileShelfBook", "bookPresentation", "bookCreatedDateInputValue", "bookCreatedAtFromDateInput", "renderGroupDetail", "renderGroupList", "gradedReadingListHtml", "renderLibraryView", "graphLayoutPositions", "filteredGraphData", "graphRelationListHtml", "graphScopeData", "buildLocalDataExport", "filteredLibraryBooks", "gradedReadingBooks"];
+  const names = ["state", "normalizeLibraryBook", "reconcileShelfBook", "bookPresentation", "bookCreatedDateInputValue", "bookCreatedAtFromDateInput", "renderGroupDetail", "renderGroupList", "gradedReadingListHtml", "renderLibraryView", "graphLayoutPositions", "graphCreatedDateKey", "timelineLayoutPositions", "timelineDateMarkerElements", "timelineSameDateRelationIds", "filteredGraphData", "graphRelationListHtml", "graphScopeData", "buildLocalDataExport", "filteredLibraryBooks", "gradedReadingBooks"];
   names.push("onClick", "graphElements", "closeNoteModal", "closePanel", "onKeydown", "renderGradedReadingView");
   const context = { console, URL, TextEncoder, TextDecoder, crypto: require("node:crypto").webcrypto, setTimeout, clearTimeout };
   Object.assign(context, overrides);
@@ -161,6 +161,91 @@ test("shared recommendations follow all acyclic dependencies", () => {
   const api = load(), pairs = [['a','c'],['a','b'],['b','c'],['b','d'],['d','c']];
   const p = api.graphLayoutPositions({nodes:['a','b','c','d'].map(id=>({id})),relations:pairs.map(([a,b])=>({from:{nodeId:a},to:{nodeId:b}}))});
   for(const [a,b] of pairs) assert.ok(p[b].x>p[a].x, `${a} -> ${b} must move right`);
+});
+
+test("timeline groups local dates into equal-width columns and keeps unknown dates last", () => {
+  const api = load();
+  const data = {
+    nodes: [
+      { id: "later-same-day", label: "乙", createdAt: "2026-08-01T15:30:00" },
+      { id: "first-same-day", label: "甲", createdAt: "2026-08-01T08:00:00" },
+      { id: "next-date", label: "下一日", createdAt: "2026-08-02T10:00:00" },
+      { id: "next-year", label: "下一年", createdAt: "2027-08-02T10:00:00" },
+      { id: "unknown-b", label: "未知乙", createdAt: "invalid" },
+      { id: "unknown-a", label: "未知甲", createdAt: "" },
+    ],
+    relations: [],
+  };
+  const positions = plain(api.timelineLayoutPositions(data));
+
+  assert.equal(api.graphCreatedDateKey(data.nodes[0].createdAt), "2026-08-01");
+  assert.equal(api.graphCreatedDateKey("not-a-date"), "unknown");
+  assert.equal(positions["later-same-day"].x, positions["first-same-day"].x);
+  assert.ok(positions["first-same-day"].y < positions["later-same-day"].y);
+  assert.equal(positions["next-date"].x - positions["first-same-day"].x, 190);
+  assert.equal(positions["next-year"].x - positions["next-date"].x, 190);
+  assert.equal(positions["unknown-a"].x - positions["next-year"].x, 190);
+  assert.ok(positions["unknown-a"].y < positions["unknown-b"].y);
+
+  const markers = plain(api.timelineDateMarkerElements(data));
+  assert.deepEqual(markers.map((element) => element.data.label), ["2026-08-01", "2026-08-02", "2027-08-02", "日期未知"]);
+  assert.ok(markers.every((element) => element.classes === "wr-timeline-date"));
+});
+
+test("timeline uses stable same-day tie breaks and compresses filtered dates", () => {
+  const api = load();
+  const createdAt = "2026-08-01T08:00:00";
+  const data = {
+    nodes: [
+      { id: "z", label: "乙", createdAt },
+      { id: "b", label: "甲", createdAt },
+      { id: "a", label: "甲", createdAt },
+      { id: "future", label: "未来", createdAt: "2030-01-01T08:00:00" },
+    ],
+    relations: [
+      { id: "same", from: { nodeId: "a" }, to: { nodeId: "b" }, type: "extended-reading", reason: "同日" },
+      { id: "later", from: { nodeId: "b" }, to: { nodeId: "future" }, type: "extended-reading", reason: "后来" },
+    ],
+  };
+  const positions = plain(api.timelineLayoutPositions(data));
+  assert.ok(positions.a.y < positions.b.y && positions.b.y < positions.z.y);
+  assert.deepEqual(plain(api.timelineSameDateRelationIds(data)), ["same"]);
+
+  const filtered = api.filteredGraphData(data, "后来", "all");
+  const filteredPositions = plain(api.timelineLayoutPositions(filtered));
+  assert.equal(filteredPositions.future.x - filteredPositions.b.x, 190);
+  assert.equal(plain(api.timelineDateMarkerElements(filtered)).length, 2);
+});
+
+test("relationship graph dates come from canonical library books", () => {
+  const api = load();
+  api.state.libraryBooks = {
+    a: book("a", { title: "起点", createdAt: "2026-08-01T08:00:00" }),
+    b: book("b", { title: "终点", createdAt: "2026-08-15T09:00:00" }),
+  };
+  api.state.relations = [{
+    id: "ab",
+    fromBookId: "a",
+    toBookId: "b",
+    from: { nodeId: "node-a", bookId: "a", title: "起点", normalizedTitle: "起点" },
+    to: { nodeId: "node-b", bookId: "b", title: "终点", normalizedTitle: "终点" },
+    type: "extended-reading",
+    reason: "继续",
+    createdAt: "2030-01-01T00:00:00",
+  }];
+
+  const nodes = plain(api.graphScopeData({ scope: "all" }).nodes);
+  assert.deepEqual(nodes.map((node) => [node.id, node.createdDateKey]), [
+    ["node-a", "2026-08-01"],
+    ["node-b", "2026-08-15"],
+  ]);
+});
+
+test("relationship workspace exposes timeline controls and joined-date details", () => {
+  assert.match(source, /data-view="timeline"[^>]*>时间线</);
+  assert.match(source, /加入书库：\$\{escapeHtml\(createdDate\)\}/);
+  assert.match(source, /wr-timeline-same-date/);
+  assert.match(source, /按加入书库日期排列/);
 });
 
 test("embedded native controls and graph clicks are not intercepted as backdrop clicks", async () => {

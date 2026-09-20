@@ -14,7 +14,10 @@
   const now = '2026-09-06T00:00:00.000Z';
   for (let i=0;i<24;i++) {
     const id = `sample-${i}`;
-    books[id] = {id,title:i === 0 ? 'Reading_And_Thinking_中英对照' : `阅读路径 ${i+1}`,author:'示例作者',normalizedTitle:'',coverUrl:cover(i),readerUrl:i<3 ? `${location.origin}/reader.html` : '',detailUrl:'',source:'manual',createdAt:now,updatedAt:now};
+    const day = String(1 + Math.floor(i / 4)).padStart(2, '0');
+    const hour = String(8 + (i % 4) * 3).padStart(2, '0');
+    const createdAt = i === 23 ? 'invalid' : `2026-08-${day}T${hour}:00:00+08:00`;
+    books[id] = {id,title:i === 0 ? 'Reading_And_Thinking_中英对照' : `阅读路径 ${i+1}`,author:'示例作者',normalizedTitle:'',coverUrl:cover(i),readerUrl:i<3 ? `${location.origin}/reader.html` : '',detailUrl:'',source:'manual',createdAt,updatedAt:now};
     books[id].normalizedTitle=books[id].title.toLowerCase();
   }
   notes['sample-0'] = {note:'一本书如何引向另一本书？这段文字用于检验中文排版。我们从最初的疑问出发，沿着阅读发现新的问题，也重新理解之前的看法。\n长上下文应当清晰可读，并且能够展开查看完整内容。重复观察、解释、验证，然后继续阅读。'.repeat(2),question:'哪些看法得到了修正？',updatedAt:now};

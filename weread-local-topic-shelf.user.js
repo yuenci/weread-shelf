@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.8.5
+// @version      0.8.6
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -3701,6 +3701,7 @@
       .wr-topic-graph-navigation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
       .wr-topic-graph-navigation label { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; font-size: 13px; }
       .wr-topic-graph-navigation select { width: min(320px, 50vw); }
+      .wr-topic-graph-navigation [role="group"] { display: flex; flex-wrap: wrap; gap: 6px; }
       .wr-topic-graph-navigation [aria-pressed="true"] { color: #2165ad; border-color: #91b7e8; background: #f0f6ff; }
       .wr-topic-graph-summary { margin: 8px 0; font-size: 12px; color: #526070; }
       .wr-topic-graph-list { min-height: 0; overflow-y: auto; padding: 2px 8px 10px 0; }
@@ -3711,6 +3712,7 @@
       .wr-topic-graph-reason { display: block; margin-top: 9px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
       .wr-topic-graph-inspector .wr-topic-graph-relation-row { font-size: 13px; padding: 10px; }
       .wr-topic-graph-inspector p { font-size: 14px; line-height: 1.7; white-space: pre-wrap; }
+      .wr-topic-graph-inspector .wr-topic-graph-book-date { margin: 10px 0; color: #526070; font-size: 12px; }
       .wr-topic-graph-card { width: min(1320px, calc(100vw - 44px)); }
       @media (min-width: 761px) {
         .wr-topic-panel.is-wide .wr-topic-panel-body { grid-template-columns: 280px minmax(0, 1fr); }
@@ -6558,6 +6560,8 @@
     relations.forEach((relation) => {
       for (const [side, ref] of [["from", relation.from], ["to", relation.to]]) {
         const book = relationRefBook(ref);
+        const libraryBook = book.id ? getLibraryBook(book.id) : null;
+        const createdAt = String((libraryBook && libraryBook.createdAt) || "");
         const outside = scope === "group" && !endpointInGroup(relation, side);
         nodes.set(ref.nodeId, {
           id: ref.nodeId,
@@ -6566,6 +6570,8 @@
           cover: book.cover || ref.coverUrl || "",
           url: book.url || ref.detailUrl || "",
           bookId: book.id || "",
+          createdAt,
+          createdDateKey: graphCreatedDateKey(createdAt),
           outside,
         });
       }
@@ -6597,8 +6603,14 @@
     return visited !== nodes.length;
   }
 
-  function graphLayoutOptions(data) {
-    return { name: "preset", positions: graphLayoutPositions(data), animate: false, padding: 48, fit: true };
+  function graphLayoutOptions(data, view = "graph") {
+    return {
+      name: "preset",
+      positions: view === "timeline" ? timelineLayoutPositions(data) : graphLayoutPositions(data),
+      animate: false,
+      padding: 48,
+      fit: true,
+    };
   }
 
   function graphLayoutPositions(data) {
@@ -6691,6 +6703,103 @@
       rowHeight = Math.max(rowHeight, height);
     }
     return positions;
+  }
+
+  const TIMELINE_UNKNOWN_DATE = "unknown";
+  const TIMELINE_COLUMN_GAP = 190;
+  const TIMELINE_FIRST_COLUMN_X = 100;
+  const TIMELINE_DATE_Y = 40;
+  const TIMELINE_FIRST_BOOK_Y = 160;
+  const TIMELINE_BOOK_GAP = 180;
+
+  function graphCreatedDateKey(value) {
+    const parsed = new Date(String(value || ""));
+    if (!Number.isFinite(parsed.getTime())) return TIMELINE_UNKNOWN_DATE;
+    const pad = (part) => String(part).padStart(2, "0");
+    return [
+      parsed.getFullYear(),
+      pad(parsed.getMonth() + 1),
+      pad(parsed.getDate()),
+    ].join("-");
+  }
+
+  function timelineDateMarkerId(dateKey) {
+    return `__wr_timeline_date__${dateKey}`;
+  }
+
+  function timelineColumns(data) {
+    const columns = new Map();
+    for (const node of data.nodes || []) {
+      const dateKey = node.createdDateKey || graphCreatedDateKey(node.createdAt);
+      if (!columns.has(dateKey)) columns.set(dateKey, []);
+      columns.get(dateKey).push(node);
+    }
+    const dateKeys = [...columns.keys()].sort((left, right) => {
+      if (left === TIMELINE_UNKNOWN_DATE) return 1;
+      if (right === TIMELINE_UNKNOWN_DATE) return -1;
+      return left.localeCompare(right);
+    });
+    return dateKeys.map((dateKey) => ({
+      dateKey,
+      label: dateKey === TIMELINE_UNKNOWN_DATE ? "日期未知" : dateKey,
+      nodes: columns.get(dateKey).sort((left, right) => {
+        const timeDifference = timestampValue(left.createdAt) - timestampValue(right.createdAt);
+        if (timeDifference) return timeDifference;
+        const titleDifference = String(left.label || left.title || "").localeCompare(
+          String(right.label || right.title || ""),
+          "zh-CN",
+          { numeric: true },
+        );
+        return titleDifference || String(left.id).localeCompare(String(right.id));
+      }),
+    }));
+  }
+
+  function timelineLayoutPositions(data) {
+    const positions = Object.create(null);
+    timelineColumns(data).forEach((column, columnIndex) => {
+      const x = TIMELINE_FIRST_COLUMN_X + columnIndex * TIMELINE_COLUMN_GAP;
+      positions[timelineDateMarkerId(column.dateKey)] = { x, y: TIMELINE_DATE_Y };
+      column.nodes.forEach((node, rowIndex) => {
+        positions[node.id] = {
+          x,
+          y: TIMELINE_FIRST_BOOK_Y + rowIndex * TIMELINE_BOOK_GAP,
+        };
+      });
+    });
+    return positions;
+  }
+
+  function timelineDateMarkerElements(data) {
+    const positions = timelineLayoutPositions(data);
+    return timelineColumns(data).map((column) => {
+      const id = timelineDateMarkerId(column.dateKey);
+      return {
+        group: "nodes",
+        data: { id, label: column.label, dateKey: column.dateKey, timelineDate: true },
+        position: positions[id],
+        classes: "wr-timeline-date",
+        selectable: false,
+        grabbable: false,
+        locked: true,
+      };
+    });
+  }
+
+  function timelineSameDateRelationIds(data) {
+    const dates = new Map(
+      (data.nodes || []).map((node) => [
+        node.id,
+        node.createdDateKey || graphCreatedDateKey(node.createdAt),
+      ]),
+    );
+    return (data.relations || [])
+      .filter((relation) => {
+        const fromDate = dates.get(relation.from.nodeId);
+        const toDate = dates.get(relation.to.nodeId);
+        return fromDate && fromDate !== TIMELINE_UNKNOWN_DATE && fromDate === toDate;
+      })
+      .map((relation) => relation.id);
   }
 
   function filteredGraphData(data, query = "", type = "all") {
@@ -6998,11 +7107,15 @@
 
   function graphInspectorHtml(kind, data) {
     if (kind === "node") {
+      const createdDate = data.createdDateKey && data.createdDateKey !== TIMELINE_UNKNOWN_DATE
+        ? data.createdDateKey
+        : "日期未知";
       return `
         <div class="wr-topic-graph-inspector-content">
           ${coverMarkup({ title: data.title, cover: data.cover }, "wr-topic-relation-cover")}
           <div><strong>${escapeHtml(data.label || bookPresentation(data).title)}</strong>${data.outside ? '<span class="wr-topic-graph-outside">组外</span>' : ""}</div>
         </div>
+        <p class="wr-topic-graph-book-date">加入书库：${escapeHtml(createdDate)}</p>
         <div class="wr-topic-graph-inspector-actions">
           ${data.bookId ? `<button class="wr-topic-btn" type="button" data-wr-action="open-graph-book" data-book-id="${escapeHtml(data.bookId)}">打开上下文</button>` : ""}
           ${data.url ? `<button class="wr-topic-btn" type="button" data-wr-action="open-external" data-url="${escapeHtml(data.url)}">${iconSvg("external")}<span>书籍详情</span></button>` : ""}
@@ -7032,6 +7145,19 @@
     if (!indicator) return false;
     indicator.remove();
     return true;
+  }
+
+  function syncTimelineGraphElements(graph, data, active) {
+    graph.nodes(".wr-timeline-date").remove();
+    graph.edges().removeClass("wr-timeline-same-date");
+    if (!active) return [];
+    const markers = timelineDateMarkerElements(data);
+    if (markers.length) graph.add(markers);
+    timelineSameDateRelationIds(data).forEach((id) => {
+      const edge = graph.getElementById(id);
+      if (edge && edge.length) edge.addClass("wr-timeline-same-date");
+    });
+    return markers.map((element) => element.data.id);
   }
 
   function initializeGraph(data) {
@@ -7075,6 +7201,26 @@
         { selector: "node.outside", style: { "border-color": "#c8d0db", opacity: 0.72 } },
         { selector: "node:selected", style: { "border-color": "#2f80ed", "border-width": 4 } },
         {
+          selector: "node.wr-timeline-date",
+          style: {
+            width: 150,
+            height: 28,
+            shape: "rectangle",
+            "background-color": "#fff",
+            "background-image": "none",
+            "background-opacity": 0,
+            "border-width": 0,
+            label: "data(label)",
+            color: "#41536a",
+            "font-size": 12,
+            "font-weight": 600,
+            "text-wrap": "none",
+            "text-valign": "center",
+            "text-halign": "center",
+            "text-margin-y": 0,
+          },
+        },
+        {
           selector: "edge",
           style: {
             width: 2,
@@ -7094,6 +7240,7 @@
         },
         { selector: "edge.author-citation", style: { "line-color": "#e68724", "target-arrow-color": "#e68724" } },
         { selector: "edge.question-driven", style: { "line-color": "#2d9a5b", "target-arrow-color": "#2d9a5b" } },
+        { selector: "edge.wr-timeline-same-date", style: { "curve-style": "bezier", "control-point-step-size": 36 } },
         { selector: "edge:selected, edge.wr-graph-hover", style: { label: "data(label)", width: 3 } },
         { selector: ".wr-graph-hidden", style: { display: "none" } },
         { selector: ".wr-graph-dimmed", style: { opacity: 0.15 } },
@@ -7105,6 +7252,7 @@
     state.graph.on("mouseout", "edge", (event) => event.target.removeClass("wr-graph-hover"));
     state.graph.on("tap", "node", (event) => {
       const node = event.target;
+      if (node.hasClass("wr-timeline-date")) return;
       const item = node.data();
       state.graph.elements().removeClass("wr-graph-dimmed wr-graph-highlight");
       const neighborhood = node.closedNeighborhood();
@@ -7157,7 +7305,7 @@
             ${getGroups().map((group) => `<option value="group:${escapeHtml(group.id)}" ${context.scope === "group" && context.groupId === group.id ? "selected" : ""}>主题 · ${escapeHtml(group.name)}</option>`).join("")}
             <option value="all" ${context.scope === "all" ? "selected" : ""}>全库关系</option>
           </select></label>
-          <div role="group" aria-label="关系显示方式"><button class="wr-topic-btn" type="button" data-wr-action="graph-view" data-view="graph" aria-pressed="${state.graphView === "graph"}">关系图</button><button class="wr-topic-btn" type="button" data-wr-action="graph-view" data-view="list" aria-pressed="${state.graphView === "list"}">关系列表</button></div>
+          <div role="group" aria-label="关系显示方式"><button class="wr-topic-btn" type="button" data-wr-action="graph-view" data-view="graph" aria-pressed="${state.graphView === "graph"}">关系图</button><button class="wr-topic-btn" type="button" data-wr-action="graph-view" data-view="timeline" aria-pressed="${state.graphView === "timeline"}">时间线</button><button class="wr-topic-btn" type="button" data-wr-action="graph-view" data-view="list" aria-pressed="${state.graphView === "list"}">关系列表</button></div>
         </div>
         ${data.relations.length ? `
           <div class="wr-topic-graph-toolbar">
@@ -7192,7 +7340,6 @@
           return;
         }
         const graph = initializeGraph(data);
-        filterGraph();
         setGraphView(state.graphView);
         if (graph) {
           hydrateGraphCoverImages(graph, data.nodes).catch((error) => {
@@ -7280,15 +7427,29 @@
     const list = document.querySelector("[data-wr-graph-list]");
     if (list) list.innerHTML = graphRelationListHtml(data);
     const summary = document.querySelector("[data-wr-graph-summary]");
-    if (summary) summary.textContent = data.relations.length ? `${data.nodes.length} 本书 · ${data.relations.length} 条关系 · 拖动与滚轮浏览，适应画布查看全貌` : "没有符合条件的阅读关系";
+    if (summary) {
+      const guidance = state.graphView === "timeline"
+        ? "按加入书库日期排列"
+        : state.graphView === "list"
+          ? "按关系逐条查看"
+          : "拖动与滚轮浏览，适应画布查看全貌";
+      summary.textContent = data.relations.length
+        ? `${data.nodes.length} 本书 · ${data.relations.length} 条关系 · ${guidance}`
+        : "没有符合条件的阅读关系";
+    }
     const inspector = document.querySelector("[data-wr-graph-inspector]");
     if (inspector) inspector.innerHTML = "<p>选择一本书或一条关系，查看连接它们的原因。</p>";
     if (!state.graph) return;
-    const ids = new Set([...data.nodes.map((node) => node.id), ...data.relations.map((relation) => relation.id)]);
+    const markerIds = syncTimelineGraphElements(state.graph, data, state.graphView === "timeline");
+    const ids = new Set([
+      ...data.nodes.map((node) => node.id),
+      ...data.relations.map((relation) => relation.id),
+      ...markerIds,
+    ]);
     state.graph.elements().removeClass("wr-graph-hidden wr-graph-dimmed wr-graph-highlight");
     state.graph.elements().forEach((element) => { if (!ids.has(element.id())) element.addClass("wr-graph-hidden"); });
-    if (data.nodes.length) {
-      state.graph.elements().filter((element) => ids.has(element.id())).layout(graphLayoutOptions(data)).run();
+    if (data.nodes.length && state.graphView !== "list") {
+      state.graph.elements().filter((element) => ids.has(element.id())).layout(graphLayoutOptions(data, state.graphView)).run();
       fitReadableGraph();
     }
   }
@@ -7311,17 +7472,15 @@
   }
 
   function setGraphView(view) {
-    state.graphView = view === "list" ? "list" : "graph";
+    state.graphView = ["timeline", "list"].includes(view) ? view : "graph";
     const canvas = document.querySelector("[data-wr-graph-canvas]");
     const list = document.querySelector("[data-wr-graph-list]");
     if (canvas) canvas.hidden = state.graphView === "list";
     if (list) list.hidden = state.graphView !== "list";
     document.querySelectorAll('[data-wr-action="graph-view"]').forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.view === state.graphView)));
     document.querySelectorAll('[data-wr-action="graph-fit"], [data-wr-action="graph-layout"]').forEach((button) => { button.disabled = state.graphView === "list"; });
-    if (state.graphView === "graph" && state.graph) {
-      state.graph.resize();
-      fitReadableGraph();
-    }
+    if (state.graphView !== "list" && state.graph) state.graph.resize();
+    filterGraph();
   }
 
   function openExternalUrl(url) {
