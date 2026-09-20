@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const source = readFileSync(require("node:path").join(__dirname, "../weread-local-topic-shelf.user.js"), "utf8");
 
 function load(overrides = {}) {
-  const names = ["state", "normalizeLibraryBook", "reconcileShelfBook", "bookPresentation", "renderGroupDetail", "renderGroupList", "gradedReadingListHtml", "renderLibraryView", "graphLayoutPositions", "filteredGraphData", "graphRelationListHtml", "graphScopeData", "buildLocalDataExport", "filteredLibraryBooks", "gradedReadingBooks"];
+  const names = ["state", "normalizeLibraryBook", "reconcileShelfBook", "bookPresentation", "bookCreatedDateInputValue", "bookCreatedAtFromDateInput", "renderGroupDetail", "renderGroupList", "gradedReadingListHtml", "renderLibraryView", "graphLayoutPositions", "filteredGraphData", "graphRelationListHtml", "graphScopeData", "buildLocalDataExport", "filteredLibraryBooks", "gradedReadingBooks"];
   names.push("onClick", "graphElements", "closeNoteModal", "closePanel", "onKeydown", "renderGradedReadingView");
   const context = { console, URL, TextEncoder, TextDecoder, crypto: require("node:crypto").webcrypto, setTimeout, clearTimeout };
   Object.assign(context, overrides);
@@ -36,6 +36,29 @@ test("edition tags and aliases do not mutate stored titles", () => {
   assert.deepEqual(plain(api.bookPresentation(original)), { title: "阅读与思考", edition: "中英对照" });
   assert.deepEqual(plain(api.bookPresentation({ title: "Original_Book_中文译本" })), { title: "Original Book", edition: "中文译本" });
   assert.equal(original.title, "Original_Book_中英对照");
+});
+
+test("book entry date editing preserves the original local time", () => {
+  const api = load();
+  const original = new Date("2026-08-01T12:34:56.789Z");
+  const updated = new Date(
+    api.bookCreatedAtFromDateInput("2024-03-12", original.toISOString()),
+  );
+
+  assert.equal(api.bookCreatedDateInputValue(updated.toISOString()), "2024-03-12");
+  assert.equal(updated.getHours(), original.getHours());
+  assert.equal(updated.getMinutes(), original.getMinutes());
+  assert.equal(updated.getSeconds(), original.getSeconds());
+  assert.equal(updated.getMilliseconds(), original.getMilliseconds());
+  assert.throws(
+    () => api.bookCreatedAtFromDateInput("2024-02-31", original.toISOString()),
+    /有效的进入本地书库日期/,
+  );
+});
+
+test("book editor exposes the entry date and saves it into createdAt", () => {
+  assert.match(source, /name="createdDate" type="date"[^>]*required/);
+  assert.match(source, /createdAt\s*=\s*bookCreatedAtFromDateInput\(/);
 });
 
 test("cards expose a reader only when a reading URL exists, and escape user content", () => {

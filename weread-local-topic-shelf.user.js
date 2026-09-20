@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Local Topic Shelf
 // @namespace    local.weread.topic-shelf
-// @version      0.8.3
+// @version      0.8.4
 // @description  Add a local book library, topic groups, reading context, and optional Cloudflare KV sync to WeRead shelf.
 // @match        *://weread.qq.com/web/shelf*
 // @run-at       document-end
@@ -181,6 +181,41 @@
 
   function nowIso() {
     return new Date().toISOString();
+  }
+
+  function bookCreatedDateInputValue(value = nowIso()) {
+    const parsed = new Date(value);
+    const date = Number.isFinite(parsed.getTime()) ? parsed : new Date();
+    const pad = (part) => String(part).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  }
+
+  function bookCreatedAtFromDateInput(value, existingValue = nowIso()) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+    if (!match) throw new Error("请输入有效的进入本地书库日期。");
+    const [, yearText, monthText, dayText] = match;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const existing = new Date(existingValue);
+    const base = Number.isFinite(existing.getTime()) ? existing : new Date();
+    const next = new Date(
+      year,
+      month - 1,
+      day,
+      base.getHours(),
+      base.getMinutes(),
+      base.getSeconds(),
+      base.getMilliseconds(),
+    );
+    if (
+      next.getFullYear() !== year ||
+      next.getMonth() !== month - 1 ||
+      next.getDate() !== day
+    ) {
+      throw new Error("请输入有效的进入本地书库日期。");
+    }
+    return next.toISOString();
   }
 
   function buildLocalDataExport(exportedAt = nowIso()) {
@@ -5249,6 +5284,7 @@
       coverUrl: "",
       detailUrl: "",
       readerUrl: "",
+      createdAt: nowIso(),
     };
     const modal = document.createElement("div");
     modal.className = "wr-topic-modal wr-topic-nested-modal";
@@ -5263,6 +5299,7 @@
           <div class="wr-topic-field"><label for="wr-library-title">书名</label><input id="wr-library-title" class="wr-topic-input" name="title" maxlength="300" value="${escapeHtml(book.title)}" required autocomplete="off"></div>
           <div class="wr-topic-field"><label for="wr-library-display-title">显示书名</label><input id="wr-library-display-title" class="wr-topic-input" name="displayTitle" maxlength="300" value="${escapeHtml(book.displayTitle || "")}" placeholder="可选，用于书架显示"><p class="wr-topic-field-hint">原始书名继续用于匹配；留空时自动整理下划线和版本后缀。</p></div>
           <div class="wr-topic-field"><label for="wr-library-author">作者</label><input id="wr-library-author" class="wr-topic-input" name="author" maxlength="300" value="${escapeHtml(book.author)}" autocomplete="off"></div>
+          <div class="wr-topic-field"><label for="wr-library-created-date">进入本地书库日期</label><input id="wr-library-created-date" class="wr-topic-input" name="createdDate" type="date" value="${escapeHtml(bookCreatedDateInputValue(book.createdAt))}" required><p class="wr-topic-field-hint">用于按时间查看书籍进入阅读路径的顺序。</p></div>
           <div class="wr-topic-field"><label for="wr-library-cover">封面 URL</label><input id="wr-library-cover" class="wr-topic-input" name="coverUrl" type="url" maxlength="2048" value="${escapeHtml(book.coverUrl)}" placeholder="https://...">${existing && existing.source === "weread" ? '<p class="wr-topic-field-hint">手动修改后会优先使用此封面；清空可恢复微信读书封面。</p>' : ""}</div>
           <div class="wr-topic-field"><label for="wr-library-detail">书籍详情 URL</label><input id="wr-library-detail" class="wr-topic-input" name="detailUrl" type="url" maxlength="2048" value="${escapeHtml(book.detailUrl)}" placeholder="https://..."></div>
           <div class="wr-topic-field"><label for="wr-library-reader">阅读入口 URL</label><input id="wr-library-reader" class="wr-topic-input" name="readerUrl" type="url" maxlength="2048" value="${escapeHtml(book.readerUrl)}" placeholder="https://..."></div>
@@ -5307,18 +5344,24 @@
   async function saveLibraryBookFromForm(form) {
     const title = form.elements.title.value.trim();
     if (!title) return;
+    const existing = getLibraryBook(form.dataset.bookId);
     let coverUrlInput;
     let detailUrl;
     let readerUrl;
+    let createdAt;
     try {
       coverUrlInput = validateOptionalHttpsUrl(form.elements.coverUrl.value, "封面 URL");
       detailUrl = validateOptionalHttpsUrl(form.elements.detailUrl.value, "书籍详情 URL");
       readerUrl = validateOptionalHttpsUrl(form.elements.readerUrl.value, "阅读入口 URL");
+      const existingCreatedAt = existing?.createdAt || nowIso();
+      createdAt = bookCreatedAtFromDateInput(
+        form.elements.createdDate.value,
+        existingCreatedAt,
+      );
     } catch (error) {
       alert(error.message);
       return;
     }
-    const existing = getLibraryBook(form.dataset.bookId);
     if (!existing) {
       const duplicate = libraryBookList().find((book) => book.normalizedTitle === normalizeTitle(title));
       if (duplicate && !confirm(`书库中已有同名书籍“${duplicate.title}”。仍要作为另一版本创建吗？`)) return;
@@ -5339,7 +5382,7 @@
         detailUrl,
         readerUrl,
         source: existing ? existing.source : "manual",
-        createdAt: (existing && existing.createdAt) || timestamp,
+        createdAt,
         lastUserEditedAt: timestamp,
         updatedAt: timestamp,
       },
